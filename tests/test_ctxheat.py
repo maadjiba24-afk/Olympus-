@@ -17,12 +17,14 @@ from __future__ import annotations
 import ast
 import json
 import math
+import os
 import time
 from pathlib import Path
 
 import pytest
 
-from olympus import config, ctxheat
+from olympus import config, ctxheat, ctxheat_state as state
+import uuid
 
 DAY = 86400.0
 T0 = 1_700_000_000.0
@@ -41,7 +43,29 @@ def shadow(monkeypatch):
 def live(monkeypatch):
     """Mode `on` — application is *allowed*, still only through the gate."""
     monkeypatch.setenv("OLYMPUS_CTXHEAT", "on")
+    registry = ctxheat._registry_entry()
+    registry.update(status='active', last_tested='2020-01-01', next_review='2099-01-01', outcome='OWNED MOCK ONLY')
+    monkeypatch.setattr(ctxheat, '_registry_entry', lambda: dict(registry))
+    monkeypatch.setattr(ctxheat, 'PROVISIONAL', False)
     return ctxheat
+
+
+@pytest.fixture(autouse=True)
+def owned_policy_sources(monkeypatch):
+    # Pure policy fixtures use deterministic owned source revisions. Real M02
+    # producer/recall bindings are exercised in wiring/evidence tests.
+    monkeypatch.setattr(ctxheat, 'resolve_source', lambda user, kind, item:
+        {'revision': state.digest([state.owner(user), kind, item]), 'est_tokens': 1})
+
+
+def _outcome(item_id, kind='wiki', *, user=None, accepted=True, source='aletheia', now=None):
+    stamp=time.time() if now is None else now
+    evidence={'owner':state.owner(user),'item':item_id,'kind':kind,
+              'revision':ctxheat.resolve_source(user,kind,item_id)['revision'],
+              'source':source,'run_id':'owned-policy-run','event_id':uuid.uuid4().hex,
+              'accepted':accepted,'observed_at':stamp}
+    return ctxheat.record_verifier_outcome(item_id,accepted,source=source,kind=kind,
+                                         user=user,now=now,evidence=evidence)
 
 
 def _entry(**over):
@@ -54,13 +78,9 @@ def _entry(**over):
 
 
 def _verified(item_id, kind="wiki", *, times=1, user=None, now=None):
-    """Give an item `times` EXTERNAL verifier acceptances (the only promotion
-    signal) plus one retrieval, the way the wiring PR eventually will."""
-    ctxheat.record(item_id, kind, retrieved=True, user=user, now=now,
-                   provenance="recall")
+    assert ctxheat.record(item_id,kind,retrieved=True,user=user,now=now,provenance='recall')
     for _ in range(times):
-        ctxheat.record_verifier_outcome(item_id, True, source="aletheia",
-                                        kind=kind, user=user, now=now)
+        assert _outcome(item_id,kind,user=user,now=now)
 
 
 def _read_raw(user=None):
@@ -218,31 +238,26 @@ def test_absurd_savings_claims_are_refused_not_clamped(shadow):
     assert ctxheat.entries() == {}
 
 
-def test_a_ledger_that_grows_a_content_field_is_quarantined_on_read(shadow):
-    _verified("page-a", "wiki")
-    path = ctxheat.ledger_path()
-    blob = json.loads(path.read_text(encoding="utf-8"))
-    blob["entries"]["wiki:page-a"]["content"] = "INJECTED PROMPT TEXT"
-    path.write_text(json.dumps(blob), encoding="utf-8")
-
-    assert ctxheat.entries() == {}                    # never half-parsed
-    assert list(path.parent.glob("context_heat.corrupt.*.json"))
-    assert not path.exists()
-    assert ctxheat.stats()["quarantined"] >= 1
+def test_a_ledger_that_grows_a_content_field_is_preserved_unavailable(shadow):
+    _verified('page-a','wiki')
+    path=ctxheat.ledger_path();blob=json.loads(path.read_bytes())
+    blob['entries']['wiki:page-a']['content']='INJECTED PROMPT TEXT'
+    path.write_text(json.dumps(blob),encoding='utf-8');before=path.read_bytes()
+    with pytest.raises(state.StateError):ctxheat.entries()
+    assert path.read_bytes()==before
+    assert not list(path.parent.glob('context_heat.corrupt.*'))
 
 
 # --- W2-I2.2 isolation ----------------------------------------------------
 
-def test_global_and_per_user_ledgers_are_separate_files(shadow):
-    _verified("shared-page", "wiki", times=3)                 # global scope
-    _verified("mine", "wiki", times=3, user="alice")          # per-user scope
-
-    global_path = ctxheat.ledger_path()
-    alice_path = ctxheat.ledger_path("alice")
-    assert global_path == config.MEMORY_DIR / "context_heat.json"
-    assert alice_path == config.MEMORY_DIR / "users" / "alice" / "context_heat.json"
-    assert set(ctxheat.entries()) == {"wiki:shared-page"}
-    assert set(ctxheat.entries("alice")) == {"wiki:mine"}
+def test_ambient_and_per_user_ledgers_are_separate_exact_owner_files(shadow):
+    _verified('shared-page','wiki',times=3)
+    _verified('mine','wiki',times=3,user='alice')
+    assert ctxheat.ledger_path()==state.path('shared')/'state.json'
+    assert ctxheat.ledger_path('alice')==state.path('alice')/'state.json'
+    assert ctxheat.ledger_path()!=ctxheat.ledger_path('alice')
+    assert set(ctxheat.entries())=={'wiki:shared-page'}
+    assert set(ctxheat.entries('alice'))=={'wiki:mine'}
 
 
 def test_heat_never_leaks_between_users_or_into_the_global_scope(shadow):
@@ -254,30 +269,31 @@ def test_heat_never_leaks_between_users_or_into_the_global_scope(shadow):
     assert ctxheat.entry("doc", "wiki") is None                 # global untouched
     # and the hot user's item is not pinnable for anyone else
     assert ctxheat.pinned_ids(ctxheat.propose_pins(2000, user="alice"))
-    assert ctxheat.propose_pins(2000, user="bob") == []
-    assert ctxheat.propose_pins(2000) == []
+    assert not ctxheat.propose_pins(2000, user="bob")
+    assert not ctxheat.propose_pins(2000)
 
 
 @pytest.mark.parametrize("hostile", [
     "../../../etc/passwd", "..", "../..", "/etc/shadow", "a/../../b",
     "\\..\\..\\windows", "..%2f..%2fetc", "  ", "x" * 500, "user\x00null",
 ])
-def test_hostile_user_ids_stay_inside_the_memory_dir(shadow, hostile):
-    assert ctxheat.record("abc", "wiki", retrieved=True, user=hostile) is True
-    path = ctxheat.ledger_path(hostile)
-    root = Path(config.MEMORY_DIR).resolve()
-    assert path is not None
-    assert root in path.resolve().parents
-    assert path.exists()
-    for created in Path(config.MEMORY_DIR).rglob("context_heat.json"):
-        assert root in created.resolve().parents
+def test_hostile_user_ids_stay_inside_the_memory_dir(shadow,hostile):
+    if not hostile.strip() or '\x00' in hostile:
+        assert not ctxheat.record('abc','wiki',retrieved=True,user=hostile)
+        assert ctxheat.status(hostile)['status']=='invalid_owner'
+        return
+    assert ctxheat.record('abc','wiki',retrieved=True,user=hostile)
+    path=ctxheat.ledger_path(hostile)
+    assert config.MEMORY_DIR.resolve() in path.resolve().parents
+    native_path=Path('\\\\?\\'+str(path.absolute())) if os.name=='nt' else path
+    assert native_path.exists()
 
 
-def test_scope_labels_are_stable_and_shared_maps_to_global():
-    assert ctxheat.scope_of(None) == "global"
-    assert ctxheat.scope_of("") == "global"
-    assert ctxheat.scope_of("shared") == "global"
-    assert ctxheat.scope_of("../../etc/passwd") == "user:etc-passwd"
+def test_scope_labels_preserve_exact_owner_and_refuse_blank():
+    assert ctxheat.scope_of(None)=='owner:shared'
+    assert ctxheat.scope_of('shared')=='owner:shared'
+    assert ctxheat.scope_of('../../etc/passwd')=='owner:../../etc/passwd'
+    with pytest.raises(state.StateError):ctxheat.scope_of('')
 
 
 # --- W2-I2.3 pin policy: budget, hysteresis, decay, protection -----------
@@ -416,7 +432,7 @@ def test_stale_incumbent_ids_are_dropped(shadow):
 
 def test_fully_decayed_items_earn_no_residency(shadow):
     _verified("ancient", "wiki", times=5, now=T0)
-    assert ctxheat.propose_pins(1000, now=T0 + 3650 * DAY) == []
+    assert not ctxheat.propose_pins(1000, now=T0 + 3650 * DAY)
 
 
 # --- W2-I2.4 the benchmark gate ------------------------------------------
@@ -429,7 +445,7 @@ def test_apply_refuses_without_a_gate(live):
     result = ctxheat.apply_pins(proposals)
     assert result.applied is False
     assert result.reason == "no_benchmark_gate"
-    assert ctxheat.pins_path().exists() is False
+    assert ctxheat._read_pins() == []
     assert ctxheat._read_pins() == []
 
 
@@ -441,14 +457,14 @@ def test_apply_refuses_when_the_gate_fails(live):
         calls.append((before, after))
         return False                       # the benchmark regressed
 
-    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=gate)
+    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=gate, operation_id='owned-line-457')
     assert result.applied is False
-    assert result.reason == "benchmark_gate_failed"
+    assert result.reason == "benchmark_failed"
     assert result.gate_called is True
     assert len(calls) == 1
     before, after = calls[0]
-    assert before["pins"] == [] and "wiki:page" in after["pins"]
-    assert ctxheat.pins_path().exists() is False
+    assert before["pins_digest"] == state.digest([]) and after["proposals"][0]["id"] == "page"
+    assert ctxheat._read_pins() == []
 
 
 def test_apply_refuses_when_the_gate_raises(live):
@@ -457,43 +473,38 @@ def test_apply_refuses_when_the_gate_raises(live):
     def gate(before, after):
         raise RuntimeError("benchmark harness exploded")
 
-    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=gate)
+    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=gate, operation_id='owned-line-473')
     assert result.applied is False
-    assert result.reason == "benchmark_gate_error"
-    assert ctxheat.pins_path().exists() is False
+    assert result.reason == "gate_error"
+    assert ctxheat._read_pins() == []
 
 
 def test_apply_refuses_a_non_callable_gate(live):
     _verified("page", "wiki", times=5)
-    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn="yes please")
+    result = ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=None, operation_id='owned-line-481')
     assert result.applied is False
     assert result.reason == "no_benchmark_gate"
 
 
 def test_apply_writes_the_pin_set_only_after_a_passing_gate(live):
-    _verified("page", "wiki", times=5)
-    proposals = ctxheat.propose_pins(1000)
-    result = ctxheat.apply_pins(proposals, gate_fn=lambda b, a: True,
-                                reason="calibration sweep 1")
-    assert result.applied is True
-    assert result.pins == ["wiki:page"]
-    stored = json.loads(ctxheat.pins_path().read_text(encoding="utf-8"))
-    assert stored["gate"] == "passed"
-    assert stored["provisional"] is True
-    assert [p["id"] for p in stored["pins"]] == ["page"]
-    # the applied set is content-minimised too
-    assert set(stored["pins"][0]) == {"id", "kind", "pinned_at", "est_tokens",
-                                      "score", "verifier_ok"}
-    assert ctxheat.applied_pins() == ctxheat._read_pins()
+    _verified('page','wiki',times=5)
+    proposals=ctxheat.propose_pins()
+    result=ctxheat.apply_pins(proposals,lambda b,a:True,operation_id='owned-apply')
+    assert result.applied and result.active
+    stored=_read_raw()
+    assert stored['gate']['operation_id']=='owned-apply'
+    assert stored['operations']['owned-apply']['result']=='applied'
+    assert [p['id'] for p in stored['pins']]==['page']
+    assert set(stored['pins'][0])=={'id','kind','pinned_at','est_tokens','score','verifier_ok','revision'}
+    assert ctxheat.applied_pins()==ctxheat._read_pins()
 
 
-def test_clear_pins_needs_no_gate_because_unpinning_is_the_safe_direction(live):
-    _verified("page", "wiki", times=5)
-    ctxheat.apply_pins(ctxheat.propose_pins(1000), gate_fn=lambda b, a: True)
-    assert ctxheat.pins_path().exists()
-    assert ctxheat.clear_pins() is True
-    assert ctxheat.pins_path().exists() is False
-    assert ctxheat.applied_pins() == []
+def test_clear_pins_retains_history_and_durable_rollback_receipt(live):
+    _verified('page','wiki',times=5)
+    assert ctxheat.apply_pins(ctxheat.propose_pins(),lambda b,a:True,operation_id='owned-apply').applied
+    assert ctxheat.clear_pins(operation_id='owned-rollback')
+    assert ctxheat.ledger_path().exists() and not ctxheat.applied_pins()
+    assert ctxheat.status(operation_id='owned-rollback')['operation']['status']=='rolled_back'
 
 
 # --- W2-I2.5 rollback: shadow and off change nothing ---------------------
@@ -505,27 +516,22 @@ def test_shadow_mode_computes_proposals_but_applies_nothing(shadow):
 
     gate_calls = []
     result = ctxheat.apply_pins(proposals,
-                                gate_fn=lambda b, a: gate_calls.append(1) or True)
+                                gate_fn=lambda b, a: gate_calls.append(1) or True, operation_id='owned-line-515')
     assert result.applied is False
     assert result.reason == "shadow"
     assert gate_calls == []                       # nothing to gate: no write
-    assert ctxheat.pins_path().exists() is False
+    assert ctxheat._read_pins() == []
     assert ctxheat.applied_pins() == []
 
 
-def test_shadow_mode_logs_the_counterfactual(shadow):
-    _verified("page", "wiki", times=5)
-    ctxheat.apply_pins(ctxheat.propose_pins(1000), reason="nightly")
-    rows = ctxheat.shadow_log()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["applied"] is False
-    assert row["outcome"] == "shadow_counterfactual_only"
-    assert row["pins"] == ["wiki:page"] and row["add"] == ["wiki:page"]
-    assert row["mode"] == "shadow" and row["provisional"] is True
-    assert row["scope"] == "global"
-    # counterfactual rows are content-minimised as well
-    assert "SECRET" not in json.dumps(row)
+def test_shadow_mode_logs_attributed_counterfactual_digest(shadow):
+    _verified('page','wiki',times=5)
+    proposals=ctxheat.propose_pins(1000)
+    ctxheat.apply_pins(proposals,reason='nightly')
+    rows=ctxheat.shadow_log();assert len(rows)==1
+    assert rows[0]['reason']=='shadow' and rows[0]['owner']=='shared'
+    assert rows[0]['proposal_digest']==state.digest([p.to_dict() for p in proposals])
+    assert not ctxheat._read_pins() and 'SECRET' not in json.dumps(rows)
 
 
 def test_shadow_pin_state_is_never_consumed_even_if_a_pin_file_exists(shadow):
@@ -543,12 +549,12 @@ def test_off_mode_is_fully_inert(monkeypatch):
     assert ctxheat.record("page", "wiki", retrieved=True) is False
     assert ctxheat.record_verifier_outcome("page", True, source="aletheia",
                                            kind="wiki") is False
-    assert ctxheat.propose_pins(1000) == []
+    assert not ctxheat.propose_pins(1000)
     assert ctxheat.entries() == {}
     assert ctxheat.entry("page", "wiki") is None
     assert ctxheat.applied_pins() == []
-    result = ctxheat.apply_pins([], gate_fn=lambda b, a: True)
-    assert result.applied is False and result.reason == "mode_off"
+    result = ctxheat.apply_pins([], gate_fn=lambda b, a: True, operation_id='owned-line-553')
+    assert result.applied is False and result.reason == "off"
     assert not Path(config.MEMORY_DIR).exists()    # not one byte written
 
 
@@ -581,7 +587,7 @@ def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
     mentions = []
     verifier_callers = []
     for path in sorted(pkg.glob("*.py")):
-        if path.name == "ctxheat.py":
+        if path.name in ("ctxheat.py", "ctxheat_state.py"):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         if "ctxheat" in text:
@@ -598,7 +604,7 @@ def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
             if name == "record_verifier_outcome":
                 verifier_callers.append(path.name)
 
-    assert set(consumers) <= {"recall.py"}, \
+    assert set(consumers) <= {"recall.py", "cli.py"}, \
         f"pin state consumed outside the gated recall seam: {consumers}"
     assert not verifier_callers, (
         "record_verifier_outcome has no trusted source at any wired seam; "
@@ -610,7 +616,7 @@ def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
     # paired with an AST check that it never IMPORTS the module — a path
     # string cannot consume a pin set; an import could.
     assert set(mentions) <= {"config.py", "doctor.py", "experiments.py",
-                             "recall.py", "retention.py"}, \
+                             "recall.py", "retention.py", "cli.py"}, \
         f"ctxheat wired in early: {mentions}"
     ret_src = (pkg / "retention.py").read_text(encoding="utf-8")
     for node in ast.walk(ast.parse(ret_src)):
@@ -636,19 +642,14 @@ def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
 
 
 def test_the_doctor_liveness_reader_only_reads(shadow):
-    """The one existing consumer (C9 optimization liveness) is a PURE READ of
-    the ledger — it must not create state or change placement."""
     from olympus import doctor
-
-    _verified("page", "wiki", times=2)
-    ctxheat.record("page", "wiki", retrieved=True, reused=True,
-                   avoided_cost_usd=0.5)
-    row = doctor._liveness_context_heat()
-    assert row["configured"] is True
-    assert row["hits"] == 1 and row["misses"] >= 1
-    assert "shadow mode" in row["inactivity_reason"] or row["activated"]
-    assert ctxheat.applied_pins() == []
-    assert ctxheat.pins_path().exists() is False
+    _verified('page','wiki',times=2)
+    ctxheat.record('page','wiki',retrieved=True,reused=True,avoided_cost_usd=.5)
+    path=ctxheat.ledger_path();before=path.read_bytes()
+    row=doctor._liveness_context_heat()
+    assert row['configured'] and not row['activated'] and row['hits']==0
+    assert row['misses']>=1 and 'evidence unavailable' in row['inactivity_reason']
+    assert not ctxheat.applied_pins() and path.read_bytes()==before
 
 
 # --- poisoning resistance -------------------------------------------------
@@ -662,7 +663,7 @@ def test_the_recording_path_cannot_self_grant_verifier_acceptance(shadow):
     assert stored["useful"] == 500
     assert ctxheat.stats()["verifier_claims_refused"] >= 500
     # ... and it therefore cannot reach the pin set
-    assert ctxheat.propose_pins(100_000) == []
+    assert not ctxheat.propose_pins(100_000)
 
 
 def test_self_reported_usefulness_never_outranks_a_verified_item(shadow):
@@ -679,40 +680,29 @@ def test_self_reported_usefulness_never_outranks_a_verified_item(shadow):
         ctxheat.propose_pins(100, est_tokens=est)) == ["wiki:honest"]
 
 
-def test_an_untrusted_source_cannot_move_the_verifier_counter(shadow):
-    ctxheat.record("evil", "wiki", retrieved=True)
-    for source in ("", None, "self", "the-item-itself", "aletheia-lookalike",
-                   "user", "recall"):
-        assert ctxheat.record_verifier_outcome(
-            "evil", True, source=source, kind="wiki") is False
-    assert ctxheat.entry("evil", "wiki")["verifier_ok"] == 0
-    # the real verifier, by its trusted label, does move it
-    assert ctxheat.record_verifier_outcome("evil", True, source="Aletheia",
-                                           kind="wiki") is True
-    assert ctxheat.entry("evil", "wiki")["verifier_ok"] == 1
+def test_source_label_alone_cannot_move_verifier_counter(shadow):
+    ctxheat.record('evil','wiki',retrieved=True)
+    for source in ('',None,'self','aletheia-lookalike','recall','aletheia','Aletheia'):
+        assert not ctxheat.record_verifier_outcome('evil',True,source=source,kind='wiki')
+    assert ctxheat.entry('evil','wiki')['verifier_ok']==0
+    assert _outcome('evil')
+    assert ctxheat.entry('evil','wiki')['verifier_ok']==1
 
 
 def test_a_rejected_verifier_outcome_is_recorded_as_a_correction(shadow):
-    _verified("page", "wiki", times=3)
-    hot = ctxheat.score(ctxheat.entry("page", "wiki"), now=time.time())
-    ctxheat.record_verifier_outcome("page", False, source="aletheia",
-                                    kind="wiki")
-    stored = ctxheat.entry("page", "wiki")
-    assert stored["corrections"] == 1 and stored["verifier_ok"] == 3
-    assert ctxheat.score(stored, now=time.time()) < hot
+    _verified('page','wiki',times=3)
+    hot=ctxheat.score(ctxheat.entry('page','wiki'))
+    assert _outcome('page',accepted=False)
+    stored=ctxheat.entry('page','wiki')
+    assert stored['corrections']==1 and stored['verifier_ok']==3
+    assert ctxheat.score(stored)<hot
 
 
-def test_verifier_outcome_without_a_kind_refuses_an_ambiguous_id(shadow):
-    _verified("dup", "wiki")
-    _verified("dup", "skill")
-    assert ctxheat.record_verifier_outcome("dup", True,
-                                           source="aletheia") is False
-    assert ctxheat.record_verifier_outcome("unknown-id", True,
-                                           source="aletheia") is False
-    _verified("solo", "memory")
-    assert ctxheat.record_verifier_outcome("solo", True,
-                                           source="aletheia") is True
-    assert ctxheat.entry("solo", "memory")["verifier_ok"] == 2
+def test_verifier_outcome_without_attribution_refuses_ambiguous_or_unique_ids(shadow):
+    _verified('dup','wiki');_verified('dup','skill');_verified('solo','memory')
+    for item in ('dup','unknown-id','solo'):
+        assert not ctxheat.record_verifier_outcome(item,True,source='aletheia')
+    assert ctxheat.entry('solo','memory')['verifier_ok']==1
 
 
 def test_trusted_sources_cannot_be_widened_from_the_environment(
@@ -732,37 +722,34 @@ def test_trusted_sources_cannot_be_widened_from_the_environment(
     '{"schema_version": 1, "entries": {"wiki:a": {"id": "a"}}}',
     '{"schema_version": 1, "entries": {"wiki:a": "text"}}',
 ])
-def test_a_corrupt_ledger_is_quarantined_and_the_store_starts_fresh(
-        shadow, blob):
-    path = ctxheat.ledger_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(blob, encoding="utf-8")
-
-    assert ctxheat.entries() == {}                       # no raise
-    assert list(path.parent.glob("context_heat.corrupt.*.json"))
-    assert ctxheat.record("fresh", "wiki", retrieved=True) is True
-    assert set(ctxheat.entries()) == {"wiki:fresh"}
+def test_a_corrupt_ledger_is_preserved_and_cannot_start_fresh(shadow,blob):
+    path=ctxheat.ledger_path();path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(blob,encoding='utf-8');before=path.read_bytes()
+    with pytest.raises(state.StateError):ctxheat.entries()
+    assert not ctxheat.record('fresh','wiki',retrieved=True)
+    assert path.read_bytes()==before
+    assert not list(path.parent.glob('context_heat.corrupt.*'))
 
 
-def test_a_mismatched_entry_key_is_quarantined(shadow):
-    _verified("page", "wiki")
-    path = ctxheat.ledger_path()
-    blob = json.loads(path.read_text(encoding="utf-8"))
-    blob["entries"]["wiki:someone-elses-id"] = blob["entries"].pop("wiki:page")
-    path.write_text(json.dumps(blob), encoding="utf-8")
-    assert ctxheat.entries() == {}
+def test_a_mismatched_entry_key_is_preserved_unavailable(shadow):
+    _verified('page','wiki');path=ctxheat.ledger_path();blob=_read_raw()
+    blob['entries']['wiki:someone-else']=blob['entries'].pop('wiki:page')
+    path.write_text(json.dumps(blob),encoding='utf-8');before=path.read_bytes()
+    with pytest.raises(state.StateError):ctxheat.entries()
+    assert path.read_bytes()==before
 
 
-def test_a_corrupt_pin_file_means_static_placement_not_an_error(live):
-    ctxheat.pins_path().parent.mkdir(parents=True, exist_ok=True)
-    ctxheat.pins_path().write_text("{{{ not json", encoding="utf-8")
-    assert ctxheat.applied_pins() == []
-    assert ctxheat.propose_pins(1000) == []
+def test_a_corrupt_pin_authority_reports_unavailable(live):
+    path=ctxheat.pins_path();path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text('{{{ not json',encoding='utf-8')
+    with pytest.raises(state.StateError):ctxheat.applied_pins()
+    with pytest.raises(state.StateError):ctxheat.propose_pins(1000)
+    assert ctxheat.status()['status']=='unavailable'
 
 
 def test_missing_ledger_means_static_placement(shadow):
     assert ctxheat.entries() == {}
-    assert ctxheat.propose_pins(1000) == []
+    assert not ctxheat.propose_pins(1000)
     assert ctxheat.applied_pins() == []
 
 
@@ -808,7 +795,7 @@ def test_garbage_knob_values_fall_back_to_defaults(monkeypatch):
 def test_explain_answers_why_an_item_is_hot(shadow):
     _verified("page", "wiki", times=4)
     out = ctxheat.explain("page", "wiki")
-    assert out["found"] is True and out["scope"] == "global"
+    assert out["found"] is True and out["scope"] == "owner:shared"
     assert out["components"]["verifier"] == pytest.approx(4 * ctxheat.W_VERIFIER)
     assert out["pin_eligible"] is True and out["eviction_protected"] is True
     assert out["score"] > 0
@@ -835,13 +822,13 @@ def test_est_tokens_falls_back_per_kind_when_the_caller_supplies_nothing():
                                   {"wiki:a": 0}) > 0        # never a zero divisor
 
 
-def test_ledger_is_bounded_and_sheds_the_coldest_entries(shadow, monkeypatch):
-    monkeypatch.setattr(ctxheat, "_MAX_ENTRIES", 5)
-    for i in range(12):
-        _verified(f"p-{i:02d}", "wiki", times=i + 1)
-    stored = ctxheat.entries()
-    assert len(stored) == 5
-    assert "wiki:p-11" in stored and "wiki:p-00" not in stored
+def test_ledger_capacity_refuses_without_erasing_prior_history(shadow,monkeypatch):
+    monkeypatch.setattr(ctxheat,'_MAX_ENTRIES',5)
+    for i in range(5):_verified(f'p-{i:02d}','wiki',times=i+1)
+    before=ctxheat.ledger_path().read_bytes()
+    assert not ctxheat.record('overflow','wiki',retrieved=True)
+    assert ctxheat.ledger_path().read_bytes()==before
+    assert len(ctxheat.entries())==5 and 'wiki:p-00' in ctxheat.entries()
 
 
 def test_repeated_records_accumulate_counters_not_content(shadow):

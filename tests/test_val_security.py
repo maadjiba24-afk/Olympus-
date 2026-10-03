@@ -711,6 +711,10 @@ class TestCrossUserIsolation:
         monkeypatch.setenv("OLYMPUS_CTXHEAT", "1")
         assert ctxheat.record("item-a", "fact", retrieved=True, user="alice")
         for raw in HOSTILE_IDS + ("bob",):
+            from olympus.ctxheat_state import StateError
+            if not raw.strip() or '\x00' in raw:
+                with pytest.raises(StateError):ctxheat._load(raw)
+                continue
             entries = ctxheat._load(raw)
             assert not any(e["id"] == "item-a" for e in entries.values()), raw
         assert any(e["id"] == "item-a"
@@ -963,7 +967,7 @@ class TestEvidencePoisoning:
 
     def test_ledger_tampering_is_detected_not_half_parsed(self, monkeypatch):
         """A ledger carrying a field outside the content-minimisation contract
-        is quarantined, never partially loaded."""
+        is preserved as unavailable, never partially loaded or reset."""
         monkeypatch.setenv("OLYMPUS_CTXHEAT", "1")
         ctxheat.record("legit", "fact", retrieved=True, user="alice")
         path = ctxheat.ledger_path("alice")
@@ -974,11 +978,14 @@ class TestEvidencePoisoning:
         key = next(iter(entries))
         entries[key]["injected_field"] = "attacker-controlled"
         path.write_text(json.dumps(data), encoding="utf-8")
-        loaded = ctxheat._load("alice")
-        assert loaded == {}, "a tampered ledger was half-parsed into the store"
-        assert ctxheat.stats()["quarantined"] > before
+        from olympus.ctxheat_state import StateError
+        retained=path.read_bytes()
+        with pytest.raises(StateError):ctxheat._load('alice')
+        assert path.read_bytes()==retained
+        assert not ctxheat.record('replacement','fact',retrieved=True,user='alice')
+        assert ctxheat.stats()['quarantined']==before
 
-    def test_a_forged_entry_key_is_quarantined(self, monkeypatch):
+    def test_a_forged_entry_key_is_preserved_unavailable(self, monkeypatch):
         """An entry whose KEY disagrees with its own id/kind (an attempt to
         graft heat onto a different item) must not load."""
         monkeypatch.setenv("OLYMPUS_CTXHEAT", "1")
@@ -988,13 +995,20 @@ class TestEvidencePoisoning:
         key = next(iter(data["entries"]))
         data["entries"][key]["id"] = "some-other-item"
         path.write_text(json.dumps(data), encoding="utf-8")
-        assert ctxheat._load("bob") == {}
+        from olympus.ctxheat_state import StateError
+        retained=path.read_bytes()
+        with pytest.raises(StateError):ctxheat._load('bob')
+        assert path.read_bytes()==retained
 
     def test_ctxheat_scope_cannot_escape_the_memory_root(self):
         root = config.MEMORY_DIR.resolve()
         for raw in HOSTILE_IDS:
+            from olympus.ctxheat_state import StateError
+            if not raw.strip() or '\x00' in raw:
+                with pytest.raises(StateError):ctxheat.ledger_path(raw)
+                continue
             p = ctxheat.ledger_path(raw)
-            assert p is None or root in p.resolve().parents, (raw, p)
+            assert root in p.resolve().parents, (raw, p)
 
     def test_routesub_never_substitutes_below_the_verification_floor(self):
         from olympus import routesub

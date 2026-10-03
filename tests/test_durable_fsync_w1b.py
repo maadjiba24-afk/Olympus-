@@ -7,11 +7,12 @@ PRs are reviewed separately; the shape is identical.
 Two directions are asserted here, and the split is the point of W1-1b:
 
 * **Group C (16 sites)** — fsync before replace, like every W1-1 site.
-* **Group B (3 sites)** — atomic publish and NO fsync, because each sits on a
+* **Group B (2 sites)** — atomic publish and NO fsync, because each sits on a
   per-model-call / per-tool-call locked read-modify-write. W1-1 shipped a
   per-call fsync on exactly that shape (`usage.record`) and broke the
   observability wall-clock contract on windows-py3.12. These tests are the
-  inverse guard: they fail if someone later "fixes" the missing fsync.
+  inverse guard for those telemetry-only sites. M07 moves context heat into a
+  durable unified authority with pin/gate receipts; its barrier is now required.
 
 Group A — the five `os.replace(existing, dest)` quarantine/restore moves — is
 deliberately untested here because it was deliberately unconverted: those move
@@ -71,21 +72,24 @@ def test_toolcall_repair_record_does_not_fsync(monkeypatch):
     assert_published_without_fsync(events, label="record_repair")
 
 
-def test_ctxheat_write_does_not_fsync(monkeypatch, tmp_path):
-    """Reached from `record()` -> `_apply()` (locked RMW), and
-    `recall._heat_record` calls that once per RETRIEVED MEMORY on the per-turn
-    `recall.context_block` path — more writes per turn than `usage.record`."""
+def test_ctxheat_authority_syncs_before_atomic_publication(monkeypatch, tmp_path):
+    """M07 receipts share authority with heat; durable publication is required."""
     events = trace(monkeypatch)
-    ctxheat._atomic_write_json(tmp_path / "heat.json", {"a": 1})
-    assert_published_without_fsync(events, label="ctxheat._atomic_write_json")
+    monkeypatch.setenv('OLYMPUS_CTXHEAT','shadow')
+    if os.name == 'nt':
+        from olympus import gallery_windows
+        real=gallery_windows.rename_same_directory
+        def rename(handle,name):
+            events.append(('replace','held-staging-handle',name))
+            return real(handle,name)
+        monkeypatch.setattr(gallery_windows,'rename_same_directory',rename)
+    assert ctxheat.record('owned-item','wiki',retrieved=True)
+    assert_data_synced_before_replace(events,label='ctxheat unified authority')
 
 
 def test_group_b_still_publishes_atomically(monkeypatch, tmp_path):
     """Giving up the sync must not give up atomicity: the file still lands
     whole, via a replace, never a partial in-place write."""
-    target = tmp_path / "heat.json"
-    ctxheat._atomic_write_json(target, {"k": "v"})
-    assert json.loads(target.read_text(encoding="utf-8")) == {"k": "v"}
     ctxbudget._save({"ratios": {"x": 1}})
     assert json.loads(ctxbudget._cal_path().read_text(encoding="utf-8")) \
         == {"ratios": {"x": 1}}
@@ -230,7 +234,6 @@ def test_backup_create_syncs(monkeypatch):
 
 GROUP_A = [
     ("olympus/ctxbudget.py", "_quarantine a corrupt calibration file"),
-    ("olympus/ctxheat.py", "_quarantine a corrupt heat ledger"),
     ("olympus/modelgrade.py", "quarantine corrupt promotion evidence"),
     ("olympus/toolcall_repair.py", "move corrupt repair telemetry aside"),
     ("olympus/backup.py", "restore: commit verified staged files into place"),

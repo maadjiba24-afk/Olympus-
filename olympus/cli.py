@@ -15,6 +15,34 @@ _DEV_LABEL = ("DEV / UNVERIFIED — signed by the public default key; proves the
               "signer.")
 
 
+def _ctxheat_command(args) -> int:
+    """Explicit local operator interface; no implicit live benchmark producer."""
+    from . import ctxheat
+    from .ctxheat_state import StateError
+    owner = args.owner
+    try:
+        if args.action in ("status", "receipt"):
+            out = ctxheat.status(owner, operation_id=args.operation_id)
+        elif args.action == "propose":
+            proposals = ctxheat.propose_pins(user=owner)
+            out = {"status": "proposed", "owner": owner,
+                   "proposals": [p.to_dict() for p in proposals],
+                   "promotion_qualified": ctxheat.promotion_qualified()}
+        elif args.action == "gate":
+            # No passing flag, arbitrary receipt import, model call or provider
+            # activation. A reviewed benchmark adapter is a separate prerequisite.
+            out = {"status": "refused", "reason": "owned_benchmark_adapter_unavailable",
+                   "owner": owner, "operation_id": args.operation_id}
+        elif args.action == "apply":
+            out = ctxheat.apply_gate(args.operation_id, user=owner).to_dict()
+        else:
+            out = ctxheat.rollback_pins(user=owner, operation_id=args.operation_id).to_dict()
+    except (StateError, ValueError, TypeError) as err:
+        out = {"status": getattr(err, "code", "invalid"), "owner": owner}
+    print(json.dumps(out, ensure_ascii=True, sort_keys=True))
+    return 0 if out.get("status") in ("available", "missing", "proposed") or out.get("reason") in ("applied", "rolled_back") else 1
+
+
 def _gallery_command(args) -> int:
     """Operator CLI: typed outcomes, exact owner and visible pre-call identity."""
     import uuid
@@ -982,6 +1010,12 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["list", "read", "delete"])
     p_doc.add_argument("name", nargs="?", help="document name (read/delete)")
 
+    p_heat = sub.add_parser("ctxheat", help="inspect exact-owner heat and gate/apply/rollback receipts")
+    p_heat.add_argument("action", nargs="?", default="status",
+                        choices=["status", "propose", "gate", "apply", "rollback", "receipt"])
+    p_heat.add_argument("--owner", default="cli", help="exact owner (default: cli)")
+    p_heat.add_argument("--operation-id", help="stable operation ID; reuse to inspect/recover an outcome")
+
     p_gal = sub.add_parser(
         "gallery", aliases=["images"],
         help="owned images: list/read/edit/remove/status/recover; explicit operator legacy review/claim")
@@ -1248,6 +1282,9 @@ def _main(argv: list[str] | None = None) -> int:
         except _config.ProductionConfigError as err:
             print(f"[production] {err}", file=sys.stderr)
             return 1
+
+    if args.command == "ctxheat":
+        return _ctxheat_command(args)
 
     if args.command == "setup":
         if getattr(args, "section", None):

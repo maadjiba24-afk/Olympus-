@@ -1,6 +1,30 @@
 # M06 gallery/media ownership and recoverable lifecycle
 
-**Status: implemented; native execution reviewed; protected delivery pending.**
+**Status: delivered in PR #317; protected merge and original-main synchronization verified.**
+
+Completion was reconciled on 2026-10-02 at main
+`baf7b912aea31efd3b6bc5286678306fdb4e708f`, tree
+`5daed33a9f551426cf01e45585291087effa40c2`, sole parent
+`7a9b8be8b30c08928a60bb56cb45b0ece69ba8f8`. The canonical parent diff SHA-256 is
+`2671fc49d502997504e19defa3039637ca752b97aae0f9884c87e674eb27f755`.
+All 25 applicable feature checks and all 25 merged-main checks succeeded.
+Exact corrected-source native full suites were Windows 12,560 passed / 297
+skipped / 0 warnings, and ext4 WSL 12,602 passed / 255 skipped / 10 warnings.
+These results belong to the corrected `5dae...` tree; earlier `ce79...` runs
+and the CP1252 failure remain separate historical evidence below.
+
+The protected-merge receipt SHA-256 is
+`5676d1e4aab0b7204a3f28b6f39c38bc97edc9c5a657dc355299de22257068a1`;
+merged-main CI summary is
+`5c573b92589cd15739fa43c100c27284e96b8edb590437d91f9881fbd756291b`;
+original-main synchronization receipt is
+`9fa178602ed57d01e02203559fa7b1fa729e24f0d0466bdb0fcfa57c46757888`.
+The local `M06-delivery-complete-20261002.json` handoff and PR #317 link the
+exact retained paths. Synchronization preserved all 87 ref names/targets,
+86 unrelated files, 2,273 historical records and 1,206 ACL records. Only main
+and origin/main advanced; the feature branch remains. The pre-existing
+`-text` CRLF fixture was explicitly pinned and preserved, not normalized.
+
 This batch continues delivered M01–M05. Its source baseline is PR #316 main
 `7a9b8be8b30c08928a60bb56cb45b0ece69ba8f8`, tree
 `0dad6df8d95a0c73087db7ae549ff75bbd4137bb`. The 2026-10-01 operator
@@ -13,7 +37,7 @@ unchanged. That reconciliation is not a new full native test run.
 
 Every row requires implementation, actual connected callers, owned executed
 checks, and reviewed evidence. A helper or documentation entry alone does not
-close a row. No row is currently claimed delivered.
+close a row. G01–G14 delivery is covered by the completion receipts above.
 
 | ID | Required contract | Required negative/recovery evidence |
 | --- | --- | --- |

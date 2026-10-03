@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 136,
+    "count": 137,
     "names": [
       "a2a",
       "actions",
@@ -71,6 +71,7 @@
       "connectors",
       "contrib",
       "crawl",
+      "ctxheat",
       "curate",
       "dashboard",
       "deployment",

@@ -408,7 +408,11 @@ def _heat_order(heat, user: str, scored: list) -> list:
     partition: pinned items move to the front, relevance order is preserved
     within each part, and no item is added or dropped."""
     pins = heat.applied_pins(user)
-    pinned = {p.get("id") for p in pins or [] if p.get("kind") == "memory"}
+    # Revalidate the actual rows already loaded for this retrieval. A second
+    # source read alone cannot authorize an older candidate snapshot.
+    revisions = {row.get("id"): heat.memory_revision(user, row) for _, row in scored}
+    pinned = {p.get("id") for p in pins or [] if p.get("kind") == "memory"
+              and p.get("revision") == revisions.get(p.get("id"))}
     if not pinned:
         return scored
     front = [s for s in scored if s[1].get("id") in pinned]
@@ -421,7 +425,7 @@ def _heat_record(heat, user: str, chosen: list) -> None:
     """Record the retrieval. Ids and kinds only (W2-I2.1)."""
     for mem in chosen:
         heat.record(mem.get("id"), "memory", retrieved=True, user=user,
-                    provenance="recall")
+                    provenance="recall", source_revision=heat.memory_revision(user, mem))
 
 
 def _heat_propose(heat, user: str, chosen: list) -> None:

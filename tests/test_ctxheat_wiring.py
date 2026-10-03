@@ -89,7 +89,7 @@ def _heat_files():
     if not root.exists():
         return set()
     return {p.name for p in root.rglob("*")
-            if p.is_file() and ("heat" in p.name or "pins" in p.name)}
+            if p.is_file() and "ctxheat-v2" in p.parts}
 
 
 # --- 1. flag off ⇒ untouched behaviour (W2-I2.5) --------------------------
@@ -184,10 +184,10 @@ def test_shadow_computes_a_proposal_and_logs_the_counterfactual(monkeypatch):
     assert applied and applied[0][1]["gate_fn"] is None
     results = ctxheat.shadow_log("u")
     assert results
-    assert results[-1]["outcome"] == "shadow_counterfactual_only"
-    assert results[-1]["applied"] is False
+    assert results[-1]["reason"] == "shadow"
+    assert results[-1]["owner"] == "u"
     assert ctxheat.pins_path("u") is not None
-    assert not ctxheat.pins_path("u").exists()
+    assert not ctxheat._read_pins("u")
 
 
 def test_shadow_passes_measured_item_sizes_not_the_provisional_fallback(
@@ -236,7 +236,7 @@ def test_on_mode_without_a_gate_refuses_and_matches_shadow(monkeypatch):
     assert results[-1].applied is False
     assert results[-1].reason == "no_benchmark_gate"
     assert results[-1].gate_called is False
-    assert not ctxheat.pins_path("u").exists()
+    assert not ctxheat._read_pins("u")
 
 
 def test_on_mode_never_writes_a_pin_set_from_this_seam(monkeypatch):
@@ -247,7 +247,7 @@ def test_on_mode_never_writes_a_pin_set_from_this_seam(monkeypatch):
     for _ in range(5):
         recall.retrieve("u", QUERY)
     assert ctxheat.applied_pins("u") == []
-    assert not ctxheat.pins_path("u").exists()
+    assert not ctxheat._read_pins("u")
 
 
 def test_recall_only_heat_is_never_pin_eligible(monkeypatch):
@@ -261,55 +261,33 @@ def test_recall_only_heat_is_never_pin_eligible(monkeypatch):
     entries = ctxheat.entries("u")
     assert entries and all(e["hits"] >= 20 for e in entries.values())
     assert all(e["verifier_ok"] == 0 for e in entries.values())
-    assert ctxheat.propose_pins(user="u") == []
+    assert not ctxheat.propose_pins(user="u")
 
 
 def test_a_gated_pin_set_is_the_only_route_to_reordering(monkeypatch):
-    """The gate is the whole mechanism, not decoration: when a pin set HAS been
-    published behind a passing gate, on-mode retrieval honours it — same items,
-    pinned ones first — and clearing it restores static placement."""
-    _on(monkeypatch)
-    seeded = _seed(n=8)
-    baseline = _ids(recall.retrieve("u", QUERY))
-    target = baseline[-1]                   # the least relevant returned item
-    assert target != baseline[0]
-
-    # A pin set published the ONLY legal way: through apply_pins' gate.
-    entry = next(m for m in seeded if m["id"] == target)
-    proposal = ctxheat.PinProposal(item_id=target, kind="memory",
-                                   action=ctxheat.ADD, score=9.0,
-                                   est_tokens=len(entry["content"]) // 4 + 4,
-                                   verifier_ok=3, reason="test")
-    result = ctxheat.apply_pins([proposal], gate_fn=lambda before, after: True,
-                                user="u", reason="benchmark passed")
-    assert result.applied is True
-
-    reordered = _ids(recall.retrieve("u", QUERY))
-    assert reordered[0] == target
-    assert sorted(reordered) == sorted(baseline)   # same set, only order moved
-
-    ctxheat.clear_pins("u")                 # one-step rollback
-    assert _ids(recall.retrieve("u", QUERY)) == baseline
+    _on(monkeypatch);_seed(n=8)
+    baseline=_ids(recall.retrieve('u',QUERY));target=baseline[-1]
+    _qualify_memory(monkeypatch,'u',target)
+    result=ctxheat.apply_pins(ctxheat.propose_pins(user='u'),lambda before,after:True,
+                            user='u',operation_id='owned-recall')
+    assert result.applied
+    reordered=_ids(recall.retrieve('u',QUERY))
+    assert reordered[0]==target and sorted(reordered)==sorted(baseline)
+    assert ctxheat.clear_pins('u',operation_id='owned-rollback')
+    assert _ids(recall.retrieve('u',QUERY))==baseline
 
 
 def test_a_failing_gate_leaves_placement_static(monkeypatch):
-    """A gate that fails (or raises) publishes nothing, so retrieval is
-    unchanged — the refusal path is not merely logged, it is load-bearing."""
-    _on(monkeypatch)
-    _seed(n=8)
-    baseline = _ids(recall.retrieve("u", QUERY))
-    proposal = ctxheat.PinProposal(item_id=baseline[-1], kind="memory",
-                                   action=ctxheat.ADD, score=9.0,
-                                   est_tokens=10, verifier_ok=3, reason="t")
-    assert ctxheat.apply_pins([proposal], gate_fn=lambda b, a: False,
-                              user="u").applied is False
-
-    def raiser(before, after):
-        raise RuntimeError("benchmark harness down")
-
-    assert ctxheat.apply_pins([proposal], gate_fn=raiser,
-                              user="u").applied is False
-    assert _ids(recall.retrieve("u", QUERY)) == baseline
+    _on(monkeypatch);_seed(n=8)
+    baseline=_ids(recall.retrieve('u',QUERY));_qualify_memory(monkeypatch,'u',baseline[-1])
+    result=ctxheat.apply_pins(ctxheat.propose_pins(user='u'),lambda b,a:False,
+                            user='u',operation_id='owned-failed')
+    assert not result.applied and result.gate_called
+    def raiser(before,after):raise RuntimeError('owned gate unavailable')
+    result=ctxheat.apply_pins(ctxheat.propose_pins(user='u'),raiser,
+                            user='u',operation_id='owned-error')
+    assert not result.applied and result.gate_called
+    assert _ids(recall.retrieve('u',QUERY))==baseline
 
 
 # --- 4. content minimisation at the wire (W2-I2.1) ------------------------
@@ -414,16 +392,22 @@ def test_a_broken_ctxheat_import_is_survivable(monkeypatch):
     assert recall.retrieve("u", QUERY)
 
 
-def test_a_corrupt_ledger_quarantines_and_retrieval_continues(monkeypatch):
-    """A tampered ledger is quarantined (reject-never-repair) and retrieval is
-    unaffected — the failure mode is static placement, never a broken turn."""
-    _shadow(monkeypatch)
-    _seed(n=4)
-    baseline = _ids(recall.retrieve("u", QUERY))
-    path = ctxheat.ledger_path("u")
-    path.write_text('{"schema_version": 1, "entries": {"memory:x": '
-                    '{"id": "x", "smuggled": "raw user content"}}}',
-                    encoding="utf-8")
-    assert _ids(recall.retrieve("u", QUERY)) == baseline
-    assert any(p.name.startswith("context_heat.corrupt.")
-               for p in path.parent.iterdir())
+def test_a_corrupt_ledger_is_preserved_and_retrieval_continues(monkeypatch):
+    _shadow(monkeypatch);_seed(n=4)
+    baseline=_ids(recall.retrieve('u',QUERY));path=ctxheat.ledger_path('u')
+    path.write_text('{"schema_version":1,"entries":{"memory:x":{"smuggled":"raw user content"}}}',encoding='utf-8')
+    before=path.read_bytes()
+    assert _ids(recall.retrieve('u',QUERY))==baseline
+    assert path.read_bytes()==before and ctxheat.status('u')['status']=='unavailable'
+
+
+def _qualify_memory(monkeypatch,user,item):
+    registry=ctxheat._registry_entry()
+    registry.update(status='active',last_tested='2020-01-01',next_review='2099-01-01',outcome='OWNED MOCK ONLY')
+    monkeypatch.setattr(ctxheat,'_registry_entry',lambda:dict(registry))
+    monkeypatch.setattr(ctxheat,'PROVISIONAL',False)
+    evidence={'owner':user,'item':item,'kind':'memory','source':'direct_verify',
+              'revision':ctxheat.resolve_source(user,'memory',item)['revision'],
+              'run_id':'owned-recall-run','event_id':'owned-recall-event',
+              'accepted':True,'observed_at':1700000000.0}
+    assert ctxheat.record_verifier_outcome(item,True,source='direct_verify',kind='memory',user=user,evidence=evidence)
