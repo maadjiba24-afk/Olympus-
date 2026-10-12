@@ -400,9 +400,31 @@ def test_skew_report_declares_every_class():
     assert skew["current_fingerprint"] == config.config_fingerprint()
 
 
-def test_clean_environment_reports_no_skew_check():
+@pytest.fixture
+def controlled_skew_environment(monkeypatch):
+    """Model one clean process for these pure diagnostic calls.
+
+    Python's environment view and its boot snapshot agree. Native environment
+    variables remain untouched, and the copied non-Olympus view retains PATH,
+    Git isolation, and the owned profile/temp settings. No detector is mocked.
+    """
+    controlled = {key: value for key, value in os.environ.items()
+                  if not key.startswith("OLYMPUS_")}
+    controlled["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    monkeypatch.setattr(os, "environ", controlled)
+    boot = {name: (controlled.get(name) or "").strip()
+            for name in config.STARTUP_SCOPED}
+    monkeypatch.setattr(config, "BOOT_STARTUP_VALUES", boot)
+    monkeypatch.setattr(config, "BOOT_FINGERPRINT", config.config_fingerprint(boot))
+    return controlled
+
+
+
+def test_clean_environment_reports_no_skew_check(controlled_skew_environment):
+    before = dict(os.environ)
     chk = _check(doctor._config_skew_checks(), "config skew")
     assert chk.status == doctor.OK and "none" in chk.detail
+    assert dict(os.environ) == before
 
 
 def test_startup_only_change_reports_restart_required(monkeypatch):
@@ -417,13 +439,16 @@ def test_startup_only_change_reports_restart_required(monkeypatch):
     assert chk.status == doctor.WARN
 
 
-def test_unknown_setting_is_detected(monkeypatch):
+
+def test_unknown_setting_is_detected(monkeypatch, controlled_skew_environment):
     monkeypatch.setenv("OLYMPUS_TOTALY_MADE_UP_KNOB", "1")
+    before = dict(os.environ)
     findings = doctor.config_skew()["unknown"]
     assert [f["setting"] for f in findings] == ["OLYMPUS_TOTALY_MADE_UP_KNOB"]
     assert "unset" in findings[0]["action"]
     assert _check(doctor._config_skew_checks(), "config unknown").status \
         == doctor.WARN
+    assert dict(os.environ) == before
 
 
 def test_a_real_knob_is_never_reported_unknown(monkeypatch):

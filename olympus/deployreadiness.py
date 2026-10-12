@@ -1,15 +1,15 @@
-"""Evidence-backed deployment durability readiness.
+"""Deployment durability diagnostics with remote recovery qualification closed.
 
-Configuration can prove that an operator *intended* to mount storage and make
-backups.  It cannot prove that the volume survived replacement, that a reboot
-kept the data, or that an archive can actually be restored.  This module keeps
-small, owner-only receipts under ``MEMORY_DIR/deployment`` and turns those
-claims into a fail-closed readiness report for named deployments.
+Existing local lifecycle receipts remain diagnostics subject to the unfinished
+M14 target/identity/permission review. Backup workflow receipts live in the
+separate native bounded evidence namespace. Their visibility and successful
+local uploader commands cannot establish remote receipt, retention or recovery.
 
-The receipts are local operational evidence, not a remote-storage attestation:
-an administrator with write access to ``MEMORY_DIR`` can forge or remove them,
-and a successful uploader exit does not prove indefinite provider retention.
-That administrator is already inside Olympus's host/filesystem trust boundary.
+Both mandatory remote backup and remote restore checks remain false until a
+target-bound M14 remote recovery proof contract is implemented and qualified.
+Consequently named deployment readiness cannot currently become ready, even
+after a successful local backup and offline restore drill. Legacy caller-dict
+backup/restore writers refuse without modifying their retained historical files.
 """
 
 from __future__ import annotations
@@ -255,44 +255,38 @@ def verify(kind: str) -> dict[str, Any]:
 
 
 def record_backup(result: dict[str, Any]) -> dict[str, Any]:
-    """Record the exact properties of one completed backup attempt."""
-    stamp = _now()
-    payload = {
-        "schema": SCHEMA,
-        "record_type": "backup_receipt",
-        "recorded_at": stamp,
-        "recorded_utc": _utc(stamp),
-        "archive_name": str(result.get("name", "")),
-        "sha256": str(result.get("sha256", "")),
-        "encrypted": bool(result.get("encrypted")),
-        "signed": bool(result.get("signed")),
-        "delivered": bool(result.get("delivered")),
-        "signature_delivered": bool(result.get("signature_delivered")),
-        "via": str(result.get("via", "")),
-        "commit": _build_commit(),
-    }
-    _atomic_json(evidence_dir(create=True) / BACKUP_RECEIPT, payload)
-    return payload
+    """Refuse legacy unbound caller assertions without reading or writing them."""
+    raise DeploymentEvidenceError(
+        'legacy caller-supplied backup receipts cannot establish recovery evidence; use the captured backup workflow')
 
 
 def record_restore(result: dict[str, Any], *, archive_name: str,
                    sha256: str) -> dict[str, Any]:
-    """Record a successful throwaway restore drill."""
-    stamp = _now()
-    payload = {
-        "schema": SCHEMA,
-        "record_type": "restore_receipt",
-        "recorded_at": stamp,
-        "recorded_utc": _utc(stamp),
-        "archive_name": archive_name,
-        "sha256": sha256,
-        "restored_files": int(result.get("restored", 0)),
-        "signed": bool(result.get("signed")),
-        "signature_ok": bool(result.get("signature_ok")),
-        "commit": _build_commit(),
-    }
-    _atomic_json(evidence_dir(create=True) / RESTORE_RECEIPT, payload)
-    return payload
+    """Refuse legacy restore assertions; keep every existing receipt intact."""
+    raise DeploymentEvidenceError(
+        'legacy caller-supplied restore receipts cannot establish recovery evidence; use an explicit offline restore drill')
+
+
+def _local_backup_observation() -> dict[str, Any]:
+    """Show bounded native receipt presence without qualifying deployment.
+
+    Native inspection checks its own selected root and receipt namespace. This
+    observation does not bind the separate mount/lifecycle probes to that same
+    held root, reconstruct write acknowledgments, or attest remote recovery.
+    The M14 target-specific qualification path remains required.
+    """
+    from . import backup_evidence
+    scope = {'observational_only': True, 'write_acknowledgment_observed': None,
+        'enclosing_workflow_complete': False, 'current_archive_availability_verified': False,
+        'remote_retention_verified': False, 'deployment_target_binding_verified': False}
+    try:
+        observed = backup_evidence.inspect()
+        counts = {'backup': 0, 'restore': 0}
+        for row in observed['receipts']:
+            counts[row['receipt']['kind']] += 1
+        return {'state': 'observed', 'visible_receipts': counts, **scope}
+    except Exception:
+        return {'state': 'unavailable', **scope}
 
 
 def _check(name: str, ok: bool, detail: str,
@@ -423,17 +417,17 @@ def report() -> dict[str, Any]:
     backup_cmd = bool(config.backup_command())
     checks.append(_check(
         "backup_destination", backup_cmd,
-        "off-machine backup command is configured" if backup_cmd else
+        "uploader command is configured; destination and remote retention remain unverified" if backup_cmd else
         "OLYMPUS_BACKUP_CMD is not configured"))
     from . import vault
     secret = False
     if vault.configured():
         try:
-            vault._fernet()
+            vault.check_ready()
             secret = True
             secret_detail = "backup encryption secret is configured and usable"
-        except Exception as exc:
-            secret_detail = f"backup encryption secret is unusable: {exc}"
+        except Exception:
+            secret_detail = "backup encryption secret is unusable; inspect vault custody and configuration"
     else:
         secret_detail = (
             "OLYMPUS_SECRET_KEY / OLYMPUS_SECRET_KEY_FILE is not configured")
@@ -479,34 +473,21 @@ def report() -> dict[str, Any]:
             f"{kind} replacement survival is verified",
             f"no recent {kind} survival receipt matches this path and build"))
 
-    backup_receipt = _read_json(evidence_dir() / BACKUP_RECEIPT)
-    backup_check = _age_check(
-        "recoverable_off_machine_backup", backup_receipt, "recorded_at",
-        int(backup_age),
-        lambda item: bool(
-            re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))
-            and item.get("encrypted")
-            and item.get("signed")
-            and item.get("delivered")
-            and item.get("signature_delivered")
-            and item.get("commit") == commit),
-        "recent encrypted, signed, delivered backup receipt is valid",
-        "no recent encrypted, signed, delivered backup matches this build")
-    checks.append(backup_check)
-
-    restore_receipt = _read_json(evidence_dir() / RESTORE_RECEIPT)
-    backup_sha = str((backup_receipt or {}).get("sha256", ""))
-    checks.append(_age_check(
-        "restore_drill", restore_receipt, "recorded_at", int(backup_age),
-        lambda item: bool(
-            re.fullmatch(r"[0-9a-f]{64}", backup_sha)
-            and item.get("sha256") == backup_sha
-            and item.get("restored_files", 0) > 0
-            and item.get("signed")
-            and item.get("signature_ok")
-            and item.get("commit") == commit),
-        "recent throwaway restore verified the current delivered archive",
-        "no recent signed restore drill matches the current delivered archive"))
+    # Caller-supplied legacy receipts and local command completion cannot
+    # attest a remote copy or a restore obtained from that remote destination.
+    # Keep both mandatory gates closed until M14 supplies a target-bound remote
+    # recovery proof contract. Local receipt visibility is useful diagnostics.
+    observation = _local_backup_observation()
+    checks.append(_check(
+        "recoverable_off_machine_backup", False,
+        "off-machine receipt, retention and recovery proof is unavailable; "
+        "uploader command completion and local receipts do not establish it",
+        local_receipts=observation, remote_recovery_verified=False))
+    checks.append(_check(
+        "restore_drill", False,
+        "no target-bound restore proof from the remote backup destination is available; "
+        "local offline drill receipts remain observational",
+        local_receipts=observation, remote_recovery_verified=False))
 
     ready = all(item["status"] == "pass" for item in checks)
     return {

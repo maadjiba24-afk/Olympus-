@@ -255,11 +255,17 @@ def require_owner(owner) -> str:
 
 # --- the durable record -----------------------------------------------------
 
+def _selected_root():
+    from .archive_io import selected_directory
+    return selected_directory(config.MEMORY_DIR)
+
+
 def _path():
     # Pure: no mkdir. Every real use of this path happens inside `_lock()`, and
     # `_lock_path()` creates MEMORY_DIR (as the parent of MEMORY_DIR/locks)
     # before the lock is taken — so the directory always exists by then.
-    return config.MEMORY_DIR / "browser_lease.json"
+    root = getattr(_LOCAL, "root", None) if _holding_lock() else None
+    return (root if root is not None else config.MEMORY_DIR) / "browser_lease.json"
 
 
 def _decode(raw: str) -> dict:
@@ -401,8 +407,8 @@ _LOCAL = threading.local()
 _THREAD_LOCK = threading.Lock()
 
 
-def _lock_path():
-    d = config.MEMORY_DIR / "locks"
+def _lock_path(root=None):
+    d = (config.MEMORY_DIR if root is None else root) / "locks"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{LOCK_NAME}.lock"
 
@@ -462,8 +468,14 @@ def _lock(timeout: float = LOCK_TIMEOUT):
     adds the cross-process half. Both are released in `finally`, and the OS
     drops the file lock anyway if the process dies mid-transaction.
     """
+    root = _selected_root()
     depth = getattr(_LOCAL, "depth", 0)
-    if depth:                                   # reentrant: already ours
+    if depth:                                   # reentrant only for this root
+        if getattr(_LOCAL, "root", None) != root:
+            raise OwnershipRefused()
+        captured = getattr(_LOCAL, "capture", None)
+        if captured is not None:
+            captured._check_lock()
         _LOCAL.depth = depth + 1
         try:
             yield
@@ -475,14 +487,19 @@ def _lock(timeout: float = LOCK_TIMEOUT):
     if not _THREAD_LOCK.acquire(timeout=max(0.0, timeout)):
         raise TimeoutError(f"browser lease lock not acquired in {timeout}s")
     try:
-        fh = open(_lock_path(), "a+b")
+        fh = open(_lock_path(root), "a+b")
         try:
             _acquire_file_lock(fh, deadline)
+            _LOCAL.root = root
+            _LOCAL.capture = None
             _LOCAL.depth = 1
             try:
+                _require_lock()
                 yield
             finally:
                 _LOCAL.depth = 0
+                _LOCAL.root = None
+                _LOCAL.capture = None
                 _release_file_lock(fh)
         finally:
             fh.close()
@@ -497,8 +514,11 @@ def _holding_lock() -> bool:
 
 
 def _require_lock() -> None:
-    if not _holding_lock():
+    if not _holding_lock() or getattr(_LOCAL, "root", None) != _selected_root():
         raise OwnershipRefused()            # fail closed on a discipline break
+    captured = getattr(_LOCAL, "capture", None)
+    if captured is not None:
+        captured._check_lock()
 
 
 # --- public API (each acquires the lock itself) -----------------------------

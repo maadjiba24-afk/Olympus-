@@ -484,3 +484,68 @@ def test_registry_failure_does_not_hide_rollback_receipt(owned,monkeypatch,capsy
     assert cli.main(['ctxheat','receipt','--owner',owned,'--operation-id','registry-failed'])==0
     assert json.loads(capsys.readouterr().out)==status
     assert snapshot(config.MEMORY_DIR)==before
+
+
+@pytest.mark.parametrize('action', ['status', 'receipt'])
+@pytest.mark.parametrize('damage', ['missing', 'malformed', 'denied'])
+def test_cli_local_heat_observation_bypasses_hydration_without_writes(owned, monkeypatch, capsys, action, damage):
+    from olympus import cli, opconfig
+    if damage != 'missing':
+        seed(owned)
+        if damage == 'malformed':
+            heat.ledger_path(owned).write_bytes(b'{owned malformed heat evidence')
+        else:
+            actual_read = state.Directory.read
+            def denied(directory, name, limit):
+                if name == 'state.json':
+                    raise PermissionError('owned heat read denied')
+                return actual_read(directory, name, limit)
+            monkeypatch.setattr(state.Directory, 'read', denied)
+    root = config.MEMORY_DIR
+    existed = root.exists()
+    before = snapshot(root)
+    directories = {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_dir()}
+    hydration = []
+    def forbidden_hydration():
+        hydration.append('called')
+        raise AssertionError('read-only heat observation hydrated configuration')
+    monkeypatch.setattr(opconfig, 'apply_secrets', forbidden_hydration)
+    operation_id = 'owned-observation' if action == 'receipt' else None
+    expected = heat.status(owned, operation_id=operation_id)
+    assert expected['status'] == ('missing' if damage == 'missing' else 'unavailable')
+    argv = ['ctxheat', action, '--owner', owned]
+    if operation_id is not None:
+        argv += ['--operation-id', operation_id]
+    assert cli.main(argv) == (0 if damage == 'missing' else 1)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == expected and captured.err == ''
+    assert not hydration
+    assert root.exists() == existed and snapshot(root) == before
+    assert {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_dir()} == directories
+    assert 'owned heat read denied' not in captured.out
+    assert 'owned malformed heat evidence' not in captured.out
+
+
+@pytest.mark.parametrize('action', ['propose', 'gate', 'apply', 'rollback'])
+def test_cli_heat_nonobservation_actions_remain_hydration_checked(owned, monkeypatch, capsys, action):
+    from olympus import cli, opconfig
+    calls = []
+    def denied_hydration():
+        calls.append('hydration')
+        raise RuntimeError('owned private hydration diagnostic')
+    def forbidden_dispatch(args):
+        calls.append('dispatch')
+        raise AssertionError('non-observation heat command bypassed hydration')
+    monkeypatch.setattr(opconfig, 'apply_secrets', denied_hydration)
+    monkeypatch.setattr(cli, '_ctxheat_command', forbidden_dispatch)
+    root = config.MEMORY_DIR
+    existed, before = root.exists(), snapshot(root)
+    argv = ['ctxheat', action, '--owner', owned]
+    if action in ('gate', 'apply', 'rollback'):
+        argv += ['--operation-id', 'owned-mutation']
+    assert cli.main(argv) == 1
+    out = capsys.readouterr()
+    assert calls == ['hydration'] and out.out == ''
+    assert 'No command was started' in out.err
+    assert 'owned private hydration diagnostic' not in out.err
+    assert root.exists() == existed and snapshot(root) == before

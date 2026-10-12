@@ -567,8 +567,12 @@ def test_get_and_set_cookies_roundtrip(monkeypatch):
 
 
 @pytest.mark.requires_crypto
-def test_save_and_restore_auth_via_vault(monkeypatch):
-    from olympus import memory, operator
+def test_save_and_restore_auth_via_vault(monkeypatch, tmp_path):
+    import copy
+    import re
+
+    from olympus import browserlease, memory, operator, vault
+
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-test-passphrase")
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
@@ -576,21 +580,89 @@ def test_save_and_restore_auth_via_vault(monkeypatch):
         monkeypatch.setattr(security, "url_block_reason", lambda u: None)
         memory.set_user("cli")
         user = memory.current_user()
-        # a live session with a cookie for shop.com
-        browser.set_transport_factory(lambda: browser.FakeTransport())
-        browser.session("cli").set_cookies([{"name": "sid", "value": "xyz",
-                                        "domain": "shop.com"}])
-        assert "Saved the shop.com session" in operator.save_auth(user, "shop.com")
-        # a fresh session has no cookies until we restore
+        assert user == "cli" and browserlease.require_owner(user) == user
+        assert config.MEMORY_DIR == tmp_path
+        expected_cookies = [{"name": "sid", "value": "xyz", "domain": "shop.com"}]
+        expected_bundle = {"cookies": expected_cookies}
+        transports = []
+
+        def fake_transport():
+            transport = browser.FakeTransport()
+            transports.append(transport)
+            return transport
+
+        def confirmed_facts(report, operation, confirmed):
+            match = re.match(r"\ACredential workflow ([0-9a-f]{32}) for shop\.com:", report)
+            assert match is not None
+            facts = operator.auth_workflow_status(user, match.group(1))
+            expected = {
+                "workflow_id": match.group(1), "domain": "shop.com", "operation": operation,
+                "complete": True, "busy": False, "login_result": None,
+                "cleanup_unconfirmed": False, "stopped": False,
+                **{stage: "confirmed" if stage in confirmed else "not_attempted"
+                   for stage in ("factory", "login", "cookies", "injection", "vault",
+                                 "telemetry", "authorization")},
+            }
+            assert facts == expected
+            assert "xyz" not in report
+            return facts
+
+        def retained_images():
+            # The module's autouse fixture owns this exact root. Observe bytes
+            # and names after the operation has released its native handles.
+            paths = sorted(tmp_path.rglob("*"))
+            assert len(paths) <= 128
+            images = {}
+            for path in paths:
+                assert not path.is_symlink()
+                relative = path.relative_to(tmp_path).as_posix()
+                if path.is_dir():
+                    images[relative] = ("directory",)
+                else:
+                    assert path.is_file() and path.stat().st_size <= 4 * 1024 * 1024
+                    images[relative] = ("file", path.read_bytes())
+            return images
+
+        browser.set_transport_factory(fake_transport)
+        original = browser.session(user)
+        assert original.set_cookies(copy.deepcopy(expected_cookies)) == 1
+        saved = confirmed_facts(operator.save_auth(user, "shop.com"), "save",
+                                {"factory", "cookies", "vault"})
+        assert len(transports) == 1
+        # Independent public vault read: this exact owner and entry must have
+        # persisted the whole bundle, not merely returned a success report.
+        assert vault.get(user, "cookies:shop.com") == expected_bundle
+
         browser.reset()
-        assert browser.session("cli").get_cookies("shop.com") == []
-        assert "Restored the shop.com session" in operator.restore_auth(
-            user, "shop.com")
-        assert browser.session("cli").get_cookies("shop.com")[0]["value"] == "xyz"
-        # unauthorized domain is refused
-        assert "isn't an authorized site" in operator.save_auth(user, "evil.com")
+        fresh = browser.session(user)
+        assert fresh is not original and len(transports) == 2
+        assert fresh.get_cookies("shop.com") == []
+        restored = confirmed_facts(operator.restore_auth(user, "shop.com"), "restore",
+                                   {"factory", "injection"})
+        assert restored["workflow_id"] != saved["workflow_id"]
+        assert browser.session(user) is fresh
+        assert fresh.get_cookies("shop.com") == expected_cookies
+        assert transports[1].cookies == expected_cookies
+        assert vault.get(user, "cookies:shop.com") == expected_bundle
+        assert vault.get(user, "cookies:evil.com") is None
+
+        before_images = retained_images()
+        before_calls = copy.deepcopy(transports[1].calls)
+        before_cookies = copy.deepcopy(transports[1].cookies)
+        assert operator.save_auth(user, "evil.com") == (
+            "Error: the site is not authorized for this operation.")
+        assert len(transports) == 2
+        assert transports[1].calls == before_calls
+        assert transports[1].cookies == before_cookies
+        assert retained_images() == before_images
+        assert operator.auth_workflow_status(user, saved["workflow_id"]) == saved
+        assert operator.auth_workflow_status(user, restored["workflow_id"]) == restored
+        assert vault.get(user, "cookies:shop.com") == expected_bundle
+        assert vault.get(user, "cookies:evil.com") is None
+        assert retained_images() == before_images
     finally:
         browser.set_transport_factory(None)
+
 
 
 def test_auth_tools_are_credentialed_actuators():
@@ -1371,3 +1443,55 @@ def test_observe_perception_is_one_atomic_eval(monkeypatch):
         assert '- "#feed" (500px below)' in obs
     finally:
         browser.set_transport_factory(None)
+
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_fake_transport_prelude_preserves_selector_result_types(prepared, present):
+    """The installed helper definition is not a durable-selector invocation."""
+    selector = "#field"
+    page_text = "offline selector text"
+    fake = browser.FakeTransport(
+        pages={"about:blank": {"text": page_text}},
+        present=[selector] if present else [],
+    )
+    cases = (
+        ("(function(){var e=__olyq(\"#field\");return e?__olySel(e):'';})()",
+         selector if present else ""),
+        ("(function(){var e=__olyq(\"#field\");return e?e.innerText:'';})()",
+         page_text if present else ""),
+        ('!!__olyq("#field")', present),
+    )
+    for expression, expected in cases:
+        submitted = browser.BrowserSession._prep(expression) if prepared else expression
+        response = fake.send("Runtime.evaluate", {
+            "expression": submitted, "returnByValue": True,
+        })
+        actual = response["result"]["value"]
+        assert type(actual) is type(expected) and actual == expected
+        assert fake.calls[-1]["params"]["expression"] == submitted
+        assert fake.filled == {}
+    expression = '__olyq("#field")'
+    submitted = browser.BrowserSession._prep(expression) if prepared else expression
+    response = fake.send("Runtime.evaluate", {
+        "expression": submitted, "returnByValue": False,
+    })
+    assert response == {"result": {"objectId": "obj-#field"} if present else {}}
+    assert fake.filled == {}
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_fake_transport_session_fill_records_only_a_mask(present):
+    fake = browser.FakeTransport(present=["#field"] if present else [])
+    session = browser.BrowserSession(fake)
+    assert session.fill("#field", "offline input value") is present
+    assert fake.filled == ({"#field": "set"} if present else {})
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["method"] == "Runtime.evaluate"
+    assert call["params"]["expression"].startswith(browser._DEEP_JS)
+    assert list(session.ledger) == [
+        {"method": "Runtime.evaluate", "params": {"redacted": True}},
+    ]
+    assert "offline input value" not in repr(fake.filled) + repr(session.ledger)

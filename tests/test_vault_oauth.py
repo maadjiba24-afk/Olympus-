@@ -74,8 +74,8 @@ def test_vault_key_sources_are_mutually_exclusive(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
     assert vault.configured() is True
     assert vault.available() is False
-    with pytest.raises(vault.VaultError, match="ambiguous"):
-        vault._fernet()
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.check_ready()
 
 
 @needs_crypto
@@ -85,8 +85,8 @@ def test_configured_missing_vault_key_file_is_not_unconfigured(monkeypatch,
     monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(missing))
     assert vault.configured() is True
     assert vault.available() is False
-    with pytest.raises(vault.VaultError, match="cannot be"):
-        vault._fernet()
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.check_ready()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
@@ -96,8 +96,8 @@ def test_vault_key_file_permissions_are_enforced(monkeypatch, tmp_path):
     key_file.write_text("file-secret", encoding="utf-8")
     key_file.chmod(0o644)
     monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
-    with pytest.raises(vault.VaultError, match="644"):
-        vault._fernet()
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.check_ready()
 
 
 @needs_crypto
@@ -108,8 +108,8 @@ def test_malformed_vault_key_file_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
     assert vault.configured() is True
     assert vault.available() is False
-    with pytest.raises(vault.VaultError, match="cannot be read"):
-        vault._fernet()
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.check_ready()
 
 
 @needs_crypto
@@ -122,8 +122,8 @@ def test_named_deployments_reject_placeholder_or_short_vault_keys(
     monkeypatch.setenv("OLYMPUS_ENV", "production")
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", secret)
     assert vault.available() is False
-    with pytest.raises(vault.VaultError, match="placeholder|32 random"):
-        vault._fernet()
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.check_ready()
 
 
 @needs_crypto
@@ -146,7 +146,7 @@ def test_vault_wrong_key_fails_closed(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "key-one")
     vault.put("u", "google", {"t": "secret"})
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "key-two")
-    with pytest.raises(vault.VaultError, match="could not decrypt"):
+    with pytest.raises(vault.VaultError, match="could not decrypt or authenticate the bounded vault record"):
         vault.get("u", "google")
 
 
@@ -183,7 +183,7 @@ def test_exchange_code_stores_encrypted_tokens(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
     monkeypatch.setattr(google_oauth, "_post_token",
                         lambda data: {"access_token": "AT", "refresh_token": "RT",
-                                      "expires_in": 3600})
+                                      "expires_in": 3600, "token_type": "Bearer"})
     assert not google_oauth.connected("u")
     google_oauth.exchange_code("u", "auth-code")
     assert google_oauth.connected("u")
@@ -198,7 +198,7 @@ def test_access_token_refreshes_when_expired(monkeypatch):
     vault.put("u", "google", {"access_token": "OLD", "refresh_token": "RT",
                               "expires_at": time.time() - 10})  # expired
     monkeypatch.setattr(google_oauth, "_post_token",
-                        lambda data: {"access_token": "NEW", "expires_in": 3600})
+                        lambda data: {"access_token": "NEW", "expires_in": 3600, "token_type": "Bearer"})
     assert google_oauth.access_token("u") == "NEW"
     # the refreshed token is persisted
     assert vault.get("u", "google")["access_token"] == "NEW"
@@ -216,76 +216,149 @@ def test_disconnect_clears_tokens(monkeypatch):
 
 @needs_crypto
 def test_web_connect_flow_validates_state(monkeypatch):
-    import json, threading, urllib.error, urllib.parse, urllib.request
+    import json, threading, time, urllib.error, urllib.parse, urllib.request
     from http.server import ThreadingHTTPServer
-    from olympus import web
+    from socketserver import TCPServer
+    from olympus import native_cleanup, web
 
     monkeypatch.setenv("OLYMPUS_GOOGLE_CLIENT_ID", "cid")
     monkeypatch.setenv("OLYMPUS_GOOGLE_CLIENT_SECRET", "sec")
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
-    monkeypatch.setattr(google_oauth, "_post_token",
-                        lambda data: {"access_token": "AT", "refresh_token": "RT",
-                                      "expires_in": 3600})
+    provider_calls = []
+    def provider(data):
+        provider_calls.append(1)
+        return {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}
+    monkeypatch.setattr(google_oauth, "_post_token", provider)
+
+    serving = threading.Event()
+    class OwnedServer(ThreadingHTTPServer):
+        daemon_threads = False
+        block_on_close = True
+        workers_unclosed = False
+
+        def server_bind(self):
+            # HTTPServer.server_bind performs reverse hostname lookup. This
+            # exact literal loopback fixture needs no DNS or ambient proxy.
+            TCPServer.server_bind(self)
+            self.server_name = 'localhost'
+            self.server_port = self.server_address[1]
+
+        def service_actions(self):
+            # This callback runs from inside the real serve_forever loop.
+            serving.set()
+
+        def server_close(self):
+            # Close the acquired listener even if start failed. Preserve the
+            # mixin's request-thread inventory, but bound every owned join.
+            workers = getattr(self, '_threads', None)
+            workers = list(workers) if isinstance(workers, list) else []
+            deadline = time.monotonic() + 5
+            def join_one(worker):
+                if worker.ident is not None:
+                    worker.join(max(0, deadline-time.monotonic()))
+            def join_workers():
+                try:
+                    native_cleanup.drain([lambda worker=worker: join_one(worker) for worker in workers])
+                finally:
+                    self.workers_unclosed = any(worker.is_alive() for worker in workers)
+            native_cleanup.drain([lambda: TCPServer.server_close(self), join_workers])
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *a, **k):
+        def redirect_request(self, *args, **kwargs):
             return None
-    opener = urllib.request.build_opener(_NoRedirect)
-
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    local = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    srv = thread = primary = None
 
     def connected():
-        # tokens land under _user_for("cookiesid9") == "web-cookiesid9"
-        return json.loads(urllib.request.urlopen(
-            base + "/api/connected?session=cookiesid9").read())["connected"]
+        with native_cleanup.closing(local.open(base+"/api/connected?session=cookiesid9", timeout=5)) as response:
+            return json.loads(response.read())["connected"]
+
+    def start():
+        request = urllib.request.Request(base+"/oauth/google/start",
+            headers={"Cookie": "olympus_sid=cookiesid9"})
+        try:
+            with native_cleanup.closing(opener.open(request, timeout=5)) as response:
+                location = response.headers["Location"]
+        except urllib.error.HTTPError as error:
+            try:
+                assert error.code == 302
+                location = error.headers["Location"]
+            except BaseException as original:
+                native_cleanup.drain([error.close], original)
+                raise
+            if not native_cleanup.drain([error.close], error):
+                raise
+        return urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["state"][0]
 
     def callback(state, cookie="olympus_sid=cookiesid9"):
+        request = urllib.request.Request(base+f"/oauth/google/callback?state={state}&code=abc",
+                                         headers={"Cookie": cookie})
         try:
-            req = urllib.request.Request(
-                base + f"/oauth/google/callback?state={state}&code=abc",
-                headers={"Cookie": cookie})
-            urllib.request.urlopen(req).read()
-            return 200
-        except urllib.error.HTTPError as e:
-            return e.code
+            with native_cleanup.closing(local.open(request, timeout=5)) as response:
+                response.read()
+                return response.status
+        except urllib.error.HTTPError as error:
+            status = error.code
+            if not native_cleanup.drain([error.close], error):
+                raise
+            return status
+
+    def joined():
+        if thread is not None and thread.ident is not None:
+            thread.join(5)
+        if srv is not None:
+            assert srv.socket.fileno() == -1
 
     try:
+        srv = OwnedServer(("127.0.0.1", 0), web.Handler)
+        thread = threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.05},
+                                  name='owned-oauth-http-server', daemon=True)
+        thread.start()
+        if not serving.wait(5):
+            pytest.exit('Owned OAuth server loop start was not confirmed; stopping validation', returncode=2)
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
         assert connected() is False
-
-        # 1) start the flow with a known browser cookie -> 302 to Google
-        #    carrying a server-issued state bound to that cookie's sid.
-        try:
-            loc = opener.open(urllib.request.Request(
-                base + "/oauth/google/start",
-                headers={"Cookie": "olympus_sid=cookiesid9"})).headers["Location"]
-        except urllib.error.HTTPError as e:
-            loc = e.headers["Location"]
-        state = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["state"][0]
-        assert state and state != "cookiesid9"        # opaque nonce, not the sid
-
-        # 2) a forged state is refused
+        state = start()
+        assert state and state != "cookiesid9"
         assert callback("forged-never-issued") == 400
-        assert connected() is False
-
-        # 3) the real state but a DIFFERENT browser cookie is refused
-        #    (login-CSRF: an attacker-started flow can't complete in another
-        #    browser). State is single-use, so re-issue for the valid step.
+        assert connected() is False and provider_calls == []
         assert callback(state, cookie="olympus_sid=someoneelse9") == 400
-
-        # 4) the real state with the matching cookie connects
-        try:
-            loc = opener.open(urllib.request.Request(
-                base + "/oauth/google/start",
-                headers={"Cookie": "olympus_sid=cookiesid9"})).headers["Location"]
-        except urllib.error.HTTPError as e:
-            loc = e.headers["Location"]
-        state2 = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["state"][0]
-        assert callback(state2) == 200
+        assert provider_calls == []
+        state = start()
+        assert callback(state) == 200
         assert connected() is True
+        assert callback(state) == 400 and provider_calls == [1]
+        bundle = vault.get("web-cookiesid9", "google")
+        assert bundle["access_token"] == "AT" and bundle["refresh_token"] == "RT"
+        assert vault.get("web-someoneelse9", "google") is None
+        raw = store.backend().get("vault", vault._key("web-cookiesid9"))
+        assert raw and raw != json.dumps(bundle).encode()
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        srv.shutdown()
+        # start() can report an interrupt after a thread has actually begun.
+        # Observe the real loop before choosing shutdown; never shutdown a
+        # server that has not entered serve_forever.
+        if thread is not None and thread.is_alive() and not serving.is_set():
+            serving.wait(5)
+        actions = []
+        if srv is not None:
+            if serving.is_set():
+                actions.append(srv.shutdown)
+            actions.append(srv.server_close)
+        actions.append(joined)
+        cleanup_failure = None
+        try:
+            native_cleanup.drain(actions, primary)
+        except BaseException as error:
+            cleanup_failure = error
+        if ((thread is not None and thread.is_alive())
+                or (srv is not None and srv.workers_unclosed)):
+            pytest.exit('Owned OAuth thread remains live; stopping validation', returncode=2)
+        if cleanup_failure is not None:
+            raise cleanup_failure
 
 
 def test_consume_state_is_single_use_and_expiring(monkeypatch):

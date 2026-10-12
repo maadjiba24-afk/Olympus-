@@ -39,9 +39,27 @@ def _settings(user: str) -> dict:
     return s
 
 
-def _save_settings(user: str, s: dict) -> None:
+def _mutate_settings(user: str, transform):
+    """Edit the current settings under the preference mutex with no external IO."""
     from . import prefs
-    prefs.set(user, _SETTINGS_KEY, s)
+    def apply(data):
+        settings = data.get(_SETTINGS_KEY) or {}
+        if type(settings) is not dict:
+            raise ValueError('operator settings must be an object')
+        settings.setdefault('sites', {})
+        if type(settings['sites']) is not dict:
+            raise ValueError('operator sites must be an object')
+        transform(settings)
+        data[_SETTINGS_KEY] = settings
+        return data
+    return prefs.mutate(user, apply, clamp_keys=(_SETTINGS_KEY,))
+
+
+def set_enabled(user: str, on: bool) -> None:
+    selected = bool(on)
+    def apply(settings):
+        settings['enabled'] = selected
+    _mutate_settings(user, apply)
 
 
 def enabled(user: str) -> bool:
@@ -55,9 +73,10 @@ def advanced(user: str) -> bool:
 
 
 def set_advanced(user: str, on: bool) -> None:
-    s = _settings(user)
-    s["advanced"] = bool(on)
-    _save_settings(user, s)
+    selected = bool(on)
+    def apply(settings):
+        settings['advanced'] = selected
+    _mutate_settings(user, apply)
 
 
 def sites(user: str) -> dict:
@@ -69,105 +88,68 @@ def login_mode(user: str, domain: str) -> str:
     return (site or {}).get("login", "manual")
 
 
-def authorize_site(user: str, domain: str, login: str = "manual") -> str:
-    """Turn the operator on for `user` and authorize one site. `login` is
-    'manual' (they sign in themselves; we never see the password) or 'remember'
-    (we store credentials in the vault for auto-login)."""
-    domain = (domain or "").strip().lower()
+def authorize_site(user: str, domain: str, login: str = 'manual') -> str:
+    """Authorize one site without replacing a concurrent settings change."""
+    domain = (domain or '').strip().lower()
     if not domain:
-        raise ValueError("a domain is required")
-    if login not in ("manual", "remember"):
+        raise ValueError('a domain is required')
+    if login not in ('manual', 'remember'):
         raise ValueError("login must be 'manual' or 'remember'")
-    s = _settings(user)
-    s["enabled"] = True
-    s["sites"][domain] = {"login": login, "created": int(time.time())}
-    _save_settings(user, s)
+    created = int(time.time())
+    def apply(settings):
+        settings['enabled'] = True
+        settings['sites'][domain] = {'login': login, 'created': created}
+    _mutate_settings(user, apply)
     return domain
 
 
 def forget_site(user: str, domain: str) -> bool:
-    """Remove a site's authorization and any stored credentials for it."""
-    domain = (domain or "").strip().lower()
-    s = _settings(user)
-    existed = s.get("sites", {}).pop(domain, None) is not None
-    _save_settings(user, s)
+    """Confirm revocation before attempting separate stored-credential cleanup."""
+    domain = (domain or '').strip().lower()
+    existed = False
+    def apply(settings):
+        nonlocal existed
+        existed = settings['sites'].pop(domain, None) is not None
+    _mutate_settings(user, apply)
+    from . import vault
+    failed = False
     try:
-        from . import vault
-        if vault.available():
-            vault.delete(user, f"site:{domain}")
-            vault.delete(user, f"cookies:{domain}")   # drop any saved session too
-    except Exception:
-        pass
+        vault.delete_many(user, [f'site:{domain}', f'cookies:{domain}'])
+    except vault.VaultError:
+        failed = True
+    if failed:
+        raise vault.VaultError('site authorization removed; stored credential cleanup is unconfirmed')
     return existed
 
 
 def save_auth(user: str, domain: str) -> str:
-    """Persist the current browser session for `domain` (its cookies) in the
-    ENCRYPTED vault, so a later run can restore it instead of logging in again.
-    Cookies are session credentials: operator-gated, domain-authorized, and never
-    surfaced to the model. Returns a short status."""
-    domain = (domain or "").strip().lower()
-    if not enabled(user):
-        return "Error: the operator isn't set up for this."
-    if not authorized(user, domain):
-        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
-    from . import vault
-    if not vault.available():
-        return ("Error: the secure vault is not configured (set "
-                "OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE).")
-    # `user` is the durable owner (the CLI principal, the chat uid, or
-    # `action.user` inside an approval callback) — never an ambient default. The
-    # lease check here is what stops one tenant reading whatever session the
-    # shared browser happens to hold for `domain` and filing it in their OWN
-    # vault; domain authorization alone cannot, because it is self-granted.
-    from . import browserlease
-    try:
-        cookies = browser.session(user).get_cookies(domain)
-    except browserlease.OwnershipRefused:
-        return browserlease.REFUSAL
-    except browser.BrowserUnavailable as err:
-        return f"No browser attached: {err}"
-    if not cookies:
-        return f"No session cookies to save for {domain}."
-    vault.put(user, f"cookies:{domain}", {"cookies": cookies})
-    return f"Saved the {domain} session ({len(cookies)} cookie(s), encrypted)."
+    """Save validated cookies under captured ownership and vault authority."""
+    from . import browser_credentials
+    return browser_credentials.save_auth(user, domain)
 
 
 def restore_auth(user: str, domain: str) -> str:
-    """Restore a previously-saved session for `domain` by injecting its
-    vault-stored cookies, so the operator skips re-login. Returns a status."""
-    domain = (domain or "").strip().lower()
-    if not enabled(user):
-        return "Error: the operator isn't set up for this."
-    if not authorized(user, domain):
-        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
-    from . import vault
-    if not vault.available():
-        return ("Error: the secure vault is not configured (set "
-                "OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE).")
-    blob = vault.get(user, f"cookies:{domain}")
-    cookies = blob.get("cookies") if isinstance(blob, dict) else None
-    if not cookies:
-        return f"No saved session for {domain} — log in once, then save it."
-    # Injecting a session makes it reachable by everything driving this browser,
-    # so it may only happen into a browser this owner holds.
-    from . import browserlease
-    try:
-        n = browser.session(user).set_cookies(cookies)
-    except browserlease.OwnershipRefused:
-        return browserlease.REFUSAL
-    except browser.BrowserUnavailable as err:
-        return f"No browser attached: {err}"
-    return f"Restored the {domain} session ({n} cookie(s))."
+    """Restore validated cookies and retain any unconfirmed browser outcome."""
+    from . import browser_credentials
+    return browser_credentials.restore_auth(user, domain)
 
 
 def has_saved_auth(user: str, domain: str) -> bool:
-    """True if a saved session exists for `domain` (used to auto-restore)."""
-    from . import vault
-    if not vault.available():
-        return False
-    blob = vault.get(user, f"cookies:{(domain or '').strip().lower()}")
-    return bool(isinstance(blob, dict) and blob.get("cookies"))
+    """Distinguish absent records from valid empty sessions and invalid data."""
+    from . import browser_credentials
+    return browser_credentials.has_saved_auth(user, domain)
+
+
+def auth_workflow_status(user: str, workflow_id: str) -> dict:
+    """Read detached, credential-free status for this exact owner's workflow."""
+    from . import browser_credentials
+    return browser_credentials.status(user, workflow_id)
+
+
+def settle_auth_workflow(user: str, workflow_id: str) -> str:
+    """Settle a retained vault update on its original executor; no browser retry."""
+    from . import browser_credentials
+    return browser_credentials.settle(user, workflow_id)
 
 
 def authorized(user: str, domain: str) -> bool:
@@ -190,18 +172,10 @@ def authorized(user: str, domain: str) -> bool:
 
 
 def remember_credentials(user: str, domain: str, username: str,
-                         password: str) -> str:
-    """Store site credentials in the encrypted vault and switch the site to
-    auto-login. The password is passed in by a SECURE LOCAL PROMPT, never by the
-    model — it must never appear as a tool argument."""
-    from . import vault
-    if not vault.available():
-        raise RuntimeError("the secure vault is not configured")
-    domain = (domain or "").strip().lower()
-    vault.put(user, f"site:{domain}", {"username": username,
-                                        "password": password})
-    authorize_site(user, domain, "remember")
-    return domain
+                         password: str, *, workflow_id=None) -> dict:
+    """Private input requires its original prepared local workflow identity."""
+    from . import securecapture
+    return securecapture.fulfill(user, domain, username, password, workflow_id=workflow_id)
 
 
 # --- review surface: what the operator did on your accounts ---------------

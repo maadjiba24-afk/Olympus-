@@ -467,8 +467,8 @@ def _held_secrets(user: str | None) -> list[tuple[str, str]]:
            if _SECRETISH_ENV.search(k) and len(v or "") >= _MIN_SECRET_LEN]
     if user:
         from . import vault
-        for name in vault.names(user):
-            for s in _flatten_strings(vault.get(user, name)):
+        for name, value in vault.entries(user).items():
+            for s in _flatten_strings(value):
                 if len(s) >= _MIN_SECRET_LEN:
                     out.append((f"vault:{name}", s))
     return out

@@ -231,38 +231,73 @@ def _saved_env() -> dict[str, str]:
 def _vault_keys() -> set[str]:
     """Registry keys that currently have a vault-stored value."""
     from . import vault
+    return {n[len(VAULT_PREFIX):] for n in vault.names(VAULT_USER)
+            if n.startswith(VAULT_PREFIX)}
+
+
+class SecretHydrationError(RuntimeError):
+    """Native assignment failed; no rollback or atomic environment claim."""
+
+    def __init__(self, applied_keys, uncertain_key):
+        super().__init__("vault configuration hydration failed; process environment may be partially updated")
+        self.applied_keys = tuple(applied_keys)
+        self.uncertain_key = uncertain_key
+
+
+def _environment_entry_valid(key, value):
+    # Portable policy at or below Windows' 32,767 UTF-16-unit variable limit,
+    # conservatively including NAME= and the terminator. Native allocation
+    # failure is still possible and must be reported as partial uncertainty.
+    # https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-setenvironmentvariablew
     try:
-        return {n[len(VAULT_PREFIX):] for n in vault.names(VAULT_USER)
-                if n.startswith(VAULT_PREFIX)}
-    except Exception:
-        return set()
+        return (len((key + "=" + value + "\x00").encode("utf-16-le")) // 2 <= 32767
+                and bool(os.fsencode(value)))
+    except (UnicodeError, ValueError):
+        return False
 
 
 def apply_secrets() -> int:
-    """Hydrate vault-stored config secrets into the environment (env wins —
-    same precedence as config.env). Called at process start by cli.main();
-    returns how many values were applied. Never raises: a missing secret key
-    or crypto backend simply means nothing to hydrate."""
+    """Hydrate one inspected snapshot after validating every selected value.
+
+    Explicit environment values win. Absence applies nothing; inaccessible
+    ciphertext or invalid stored values refuse before changing the environment.
+    This is a process-local update, not an atomic cross-process configuration
+    transaction or protection against concurrent environment mutation.
+    """
     from . import vault
-    applied = 0
-    try:
-        names = vault.names(VAULT_USER)
-    except Exception:
-        return 0
-    for name in names:
+    selected = {}
+    for name, value in vault.entries(VAULT_USER).items():
         if not name.startswith(VAULT_PREFIX):
             continue
         key = name[len(VAULT_PREFIX):]
-        if key not in REGISTRY or key in os.environ:
+        setting = REGISTRY.get(key)
+        if setting is None or not setting.secret or key in os.environ:
             continue
+        if (type(value) is not str or not value or "\x00" in value
+                or not _environment_entry_valid(key, value)):
+            raise vault.VaultError("stored configuration secret is invalid")
+        invalid = False
         try:
-            value = vault.get(VAULT_USER, name)
+            invalid = setting.validate(value) is not None
         except Exception:
-            continue
-        if isinstance(value, str) and value:
+            invalid = True
+        if invalid:
+            raise vault.VaultError("stored configuration secret is invalid")
+        selected[key] = value
+    applied, attempted, failed = [], None, False
+    try:
+        for key, value in selected.items():
+            attempted = key
             os.environ[key] = value
-            applied += 1
-    return applied
+            applied.append(key)
+    except Exception:
+        failed = True
+    except BaseException as exc:
+        exc.add_note("vault configuration hydration interrupted; process environment may be partially updated")
+        raise
+    if failed:
+        raise SecretHydrationError(applied, attempted)
+    return len(selected)
 
 
 def set_value(key: str, value: str) -> str:
@@ -274,6 +309,10 @@ def set_value(key: str, value: str) -> str:
             f"'{key}' is not operator-configurable from the panel "
             "(strict allowlist; see docs/ADMIN_PANEL.md)")
     value = (value or "").strip()
+    if "\x00" in value or not _environment_entry_valid(key, value):
+        raise ValueError("setting cannot be represented within the bounded process environment policy")
+    if not setting.secret and ("\r" in value or "\n" in value):
+        raise ValueError("non-secret settings must be one line without embedded newlines")
     reason = setting.validate(value)
     if reason:
         raise ValueError(f"{setting.label}: {reason}")
@@ -289,18 +328,32 @@ def set_value(key: str, value: str) -> str:
                 "secrets are never written to disk in the clear") from err
         # Belt and braces: if an old plaintext copy exists in config.env
         # (e.g. from the setup wizard), remove it — the vault owns it now.
-        saved = _saved_env()
-        if key in saved:
-            saved.pop(key)
-            firstrun._save(saved)
+        cleanup_failed = False
+        try:
+            saved = _saved_env()
+            if key in saved:
+                saved.pop(key)
+                firstrun._save(saved)
+        except Exception:
+            cleanup_failed = True
+        if cleanup_failed:
+            raise ValueError("encrypted setting stored; saved configuration cleanup/application is unconfirmed")
     else:
+        save_failed = False
         try:
             firstrun.save_env_value(key, value)
-        except firstrun.ConfigFileError as err:
-            raise ValueError(
-                f"cannot save '{setting.label}': {err}") from err
+        except Exception:
+            save_failed = True
+        if save_failed:
+            raise ValueError("setting persistence/application is unconfirmed; inspect saved configuration before retrying")
 
-    os.environ[key] = value            # live in this process immediately
+    apply_failed = False
+    try:
+        os.environ[key] = value
+    except Exception:
+        apply_failed = True
+    if apply_failed:
+        raise ValueError("setting was saved; application to this process environment is unconfirmed")
     where = "the vault (encrypted)" if setting.secret else "config.env"
     note = f"{setting.label} saved to {where} and applied here now."
     if setting.consumers:
@@ -316,17 +369,21 @@ def unset(key: str) -> str:
         raise ValueError(f"'{key}' is not operator-configurable from the panel")
     removed = []
     saved = _saved_env()
+    from . import vault
+    if vault.delete(VAULT_USER, _vault_name(key)):
+        removed.append("vault")
     if key in saved:
         saved.pop(key)
-        firstrun._save(saved)
+        failed = False
+        try:
+            firstrun._save(saved)
+        except Exception:
+            failed = True
+        if failed:
+            # The two stores are not one transaction. Never report complete
+            # revocation when configuration cleanup could not be confirmed.
+            raise ValueError("vault cleanup completed; saved configuration cleanup is unconfirmed")
         removed.append("config.env")
-    from . import vault
-    try:
-        if vault.get(VAULT_USER, _vault_name(key)) is not None:
-            vault.delete(VAULT_USER, _vault_name(key))
-            removed.append("vault")
-    except Exception:
-        pass
     had_env = os.environ.pop(key, None) is not None
     if not removed and not had_env:
         return f"{setting.label} was not set."
@@ -379,7 +436,7 @@ def vault_ready() -> bool:
     """Whether secret settings can be stored (crypto + usable vault key)."""
     from . import vault
     try:
-        vault._fernet()
+        vault.check_ready()
         return True
     except Exception:
         return False

@@ -18,6 +18,7 @@ the orchestrator at the start of each conversation turn.
 
 from __future__ import annotations
 
+from . import native_cleanup
 import contextlib
 import contextvars
 import hashlib
@@ -957,18 +958,27 @@ def migrate_notes() -> dict:
 
 
 def _maybe_decrypt(raw: bytes) -> bytes:
-    """A plain export is gzip (magic 1f 8b). Anything else we treat as a
-    vault-encrypted export and decrypt with the same Fernet key vault.py uses
-    (no new crypto dependency)."""
+    """Compatibility bytes reader; note_archive reports decryption metadata.
+
+    New envelopes authenticate the notes purpose; legacy Fernet remains
+    readable but cannot prove its original purpose. No source is rewritten.
+    """
+    from . import archive_io
+    if type(raw) is not bytes or len(raw) > archive_io.MAX_CIPHERTEXT:
+        raise ValueError('memory archive input bound exceeded')
     if raw[:2] == b"\x1f\x8b":
+        if len(raw) > 72 * 1024 * 1024:
+            raise ValueError('memory archive plaintext bound exceeded')
         return raw
-    from . import vault
     try:
-        return vault._fernet().decrypt(raw)
-    except Exception as err:   # InvalidToken, VaultError, ...
-        raise ValueError(
-            "this export is encrypted and could not be decrypted — set "
-            "OLYMPUS_SECRET_KEY to the key it was exported with.") from err
+        with archive_io.operation('notes', require_key=True) as session:
+            return session.decrypt(raw).data
+    except Exception as error:
+        cleanup_unconfirmed = native_cleanup.unknown(error)
+    error = ValueError('encrypted memory archive could not be decrypted with selected custody')
+    if cleanup_unconfirmed:
+        native_cleanup.mark(error)
+    raise error from None
 
 
 def export_memory(out_path, *, user: str | None = None, all_users: bool = False,

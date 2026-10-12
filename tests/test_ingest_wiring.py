@@ -414,7 +414,7 @@ def test_flag_on_memory_import_is_refused(gate_on, tmp_path):
 
 
 def test_flag_on_memory_import_refuses_a_nul_bearing_manifest(gate_on, tmp_path):
-    archive = tmp_path / "nul.tar.gz"
+    archive = tmp_path / "nul-bearing-manifest.tar.gz"
     _make_archive(archive,
                   {"schema_version": memory.ARCHIVE_SCHEMA_VERSION,
                    "files": [{"path": "lessons/x.md", "sha256": "",

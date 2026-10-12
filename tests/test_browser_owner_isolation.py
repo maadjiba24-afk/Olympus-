@@ -12,6 +12,7 @@ user B: a legitimate, fully onboarded second tenant — not an injected page.
 """
 
 import json
+from pathlib import Path
 import threading
 import time
 
@@ -29,10 +30,14 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr("olympus.security.url_block_reason",
                         lambda u, resolve=True: None)
-    browser.set_transport_factory(None)
+    # Test-owned transports only. Restore globals without retrying simulated
+    # unknown construction/destruction during fixture teardown.
+    for name in ('_session', '_factory_attempt', '_release_attempt', '_launched', '_TRANSPORT_FACTORY'):
+        monkeypatch.setattr(browser, name, None)
     browserlease.clear_for_tests()
     yield
-    browser.set_transport_factory(None)
+    browser._session = browser._factory_attempt = browser._release_attempt = None
+    browser._launched = browser._TRANSPORT_FACTORY = None
     browserlease.clear_for_tests()
     memory.set_user("shared")
 
@@ -43,6 +48,14 @@ def _fake(pages=None, targets=None, present=None):
     browser.set_transport_factory(
         lambda: browser.FakeTransport(pages=pages, targets=targets,
                                       present=present))
+
+
+def _stub_kind(monkeypatch, kind, transport):
+    """Select a transport kind while constructing only an owned stub."""
+    selection = browser._TransportSelection(kind, None, 'chromium', '', False, False)
+    monkeypatch.setattr(browser, '_select_transport', lambda: selection)
+    monkeypatch.setattr(browser, '_build_transport', lambda **kwargs: transport)
+    monkeypatch.setenv('OLYMPUS_BROWSER_OWNER', A)
 
 
 def _own_as(user, url="https://mail.corp.com/"):
@@ -333,7 +346,7 @@ def test_configured_untrusted_owner_cannot_unlock_remote_cdp(monkeypatch):
     browser._session = None
     attempted = []
     monkeypatch.setattr(browser, "_build_transport",
-                        lambda: attempted.append("built"))
+                        lambda **kwargs: attempted.append("built"))
 
     for who in ("shared", "web-attacker", A):
         with pytest.raises(browserlease.OwnershipRefused):
@@ -385,16 +398,19 @@ def test_concurrent_process_claim_has_exactly_one_winner(tmp_path):
     script = tmp_path / "claim.py"
     script.write_text(
         "import sys, pathlib\n"
+        f"sys.path.insert(0, {str(repo)!r})\n"
         "from olympus import config\n"
+        f"assert pathlib.Path(config.__file__).resolve() == pathlib.Path({str(repo / 'olympus/config.py')!r}).resolve()\n"
         f"config.MEMORY_DIR = pathlib.Path({str(tmp_path)!r})\n"
         "from olympus import browserlease\n"
+        f"assert pathlib.Path(browserlease.__file__).resolve() == pathlib.Path({str(repo / 'olympus/browserlease.py')!r}).resolve()\n"
         "try:\n"
         "    rec = browserlease.claim(sys.argv[1], 'fake', '')\n"
         "    print('WON' if rec['owner'] == sys.argv[1] else 'LOST')\n"
         "except browserlease.OwnershipRefused:\n"
         "    print('LOST')\n", encoding="utf-8")
 
-    procs = [subprocess.Popen([sys.executable, str(script), u],
+    procs = [subprocess.Popen([sys.executable, '-I', '-B', str(script), u],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               cwd=str(repo))
              for u in (A, B)]
@@ -427,11 +443,14 @@ def test_concurrent_process_claim_has_exactly_one_winner(tmp_path):
 #     R1 resumes and unlinks — deleting B's lease.
 #     C claims a browser that still holds B's session state.
 
-_CHILD_PREAMBLE = """
+_CHILD_PREAMBLE = f"""
 import json, os, pathlib, sys, time
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
 from olympus import config
+assert pathlib.Path(config.__file__).resolve() == pathlib.Path({str(Path(__file__).resolve().parents[1] / 'olympus/config.py')!r}).resolve()
 config.MEMORY_DIR = pathlib.Path(sys.argv[1])
 from olympus import browserlease
+assert pathlib.Path(browserlease.__file__).resolve() == pathlib.Path({str(Path(__file__).resolve().parents[1] / 'olympus/browserlease.py')!r}).resolve()
 """
 
 
@@ -446,7 +465,7 @@ def _run_children(tmp_path, bodies, timeout=180):
         script = tmp_path / f"child{i}.py"
         script.write_text(_CHILD_PREAMBLE + body, encoding="utf-8")
         procs.append(subprocess.Popen(
-            [sys.executable, str(script), str(tmp_path)],
+            [sys.executable, '-I', '-B', str(script), str(tmp_path)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(repo)))
     out = []
     for p in procs:
@@ -493,7 +512,7 @@ with browserlease._lock():
     print('WAITED %.2f' % (time.monotonic() - t0), flush=True)
 """, encoding="utf-8")
 
-    hp = subprocess.Popen([sys.executable, str(holder), str(tmp_path)],
+    hp = subprocess.Popen([sys.executable, '-I', '-B', str(holder), str(tmp_path)],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           cwd=str(repo))
     # Wait until the holder reports it actually owns the lock, so the waiter's
@@ -501,7 +520,7 @@ with browserlease._lock():
     assert hp.stdout.readline().strip() == b"HELD"
 
     t0 = time.monotonic()
-    wp = subprocess.run([sys.executable, str(waiter), str(tmp_path)],
+    wp = subprocess.run([sys.executable, '-I', '-B', str(waiter), str(tmp_path)],
                         capture_output=True, timeout=120, cwd=str(repo))
     elapsed = time.monotonic() - t0
     hp.communicate(timeout=60)
@@ -525,7 +544,7 @@ def test_process_simultaneous_initial_claim_has_one_winner(tmp_path):
     script = tmp_path / "claim.py"
     script.write_text(_CHILD_PREAMBLE + _CLAIM, encoding="utf-8")
     procs = [subprocess.Popen(
-        [sys.executable, str(script), str(tmp_path), u],
+        [sys.executable, '-I', '-B', str(script), str(tmp_path), u],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(repo))
         for u in (A, B)]
     outs = []
@@ -741,7 +760,7 @@ with browserlease._lock():
     print('LOCKED', flush=True)
     os._exit(9)                      # die hard, inside the transaction
 """, encoding="utf-8")
-    p = subprocess.Popen([sys.executable, str(script), str(tmp_path)],
+    p = subprocess.Popen([sys.executable, '-I', '-B', str(script), str(tmp_path)],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          cwd=str(repo))
     out, _err = p.communicate(timeout=120)
@@ -1041,12 +1060,8 @@ def test_lease_record_is_durable_and_restrictive(tmp_path):
 def test_remote_cdp_refuses_release_and_transfer(monkeypatch):
     """Olympus will not wipe a browser profile it does not own. Reassigning a
     personal browser is an operator action, not an automatic one."""
-    _fake()
+    _stub_kind(monkeypatch, browser.REMOTE_CDP, browser.FakeTransport())
     _own_as(A)
-    record = browserlease.current()
-    record["transport"] = browser.REMOTE_CDP
-    with browserlease._lock():
-        browserlease._write(record)
 
     out = browser.relinquish(A)
     assert out == browserlease.REASSIGN_NOTICE
@@ -1070,7 +1085,7 @@ def test_remote_cdp_without_lease_or_configured_owner_refuses_before_attaching(
     monkeypatch.setattr(browser, "_resolve_page_ws",
                         lambda v: attempted.append(v))
     monkeypatch.setattr(browser, "_build_transport",
-                        lambda: attempted.append("built"))
+                        lambda **kwargs: attempted.append("built"))
 
     with pytest.raises(browserlease.OwnershipRefused):
         browser.session(A)
@@ -1084,7 +1099,7 @@ def test_remote_cdp_with_configured_owner_may_claim(monkeypatch):
     browser._session = None
     built = []
     monkeypatch.setattr(browser, "_build_transport",
-                        lambda: built.append(1) or browser.FakeTransport())
+                        lambda **kwargs: built.append(1) or browser.FakeTransport())
     monkeypatch.setattr(browser, "_fingerprint", lambda kind: "")
 
     assert browser.session(A) is not None
@@ -1096,7 +1111,8 @@ def test_remote_cdp_with_configured_owner_may_claim(monkeypatch):
         browser.session(B)
 
 
-def test_playwright_release_requires_verified_destruction(monkeypatch):
+@pytest.mark.parametrize('honest', [False, True], ids=['unconfirmed', 'confirmed'])
+def test_playwright_release_requires_verified_destruction(monkeypatch, honest):
     """Playwright is the one transport whose close() genuinely destroys state
     (an ephemeral context, no profile on disk) — but it still has to PROVE it."""
     class StubBrowser:
@@ -1114,25 +1130,20 @@ def test_playwright_release_requires_verified_destruction(monkeypatch):
                 self._closed = True
                 self._browser.connected = False
 
-    lying = StubTransport(honest=False)
-    browser.set_transport_factory(lambda: lying)
+    transport = StubTransport(honest=honest)
+    _stub_kind(monkeypatch, browser.PLAYWRIGHT, transport)
     browser.session(A)
-    with browserlease._lock():
-        rec = browserlease._read()
-        rec["transport"] = browser.PLAYWRIGHT
-        browserlease._write(rec)
-
     out = browser.relinquish(A)
-    assert out.startswith("Error: ownership retained")
-    assert browserlease.current()["owner"] == A          # NOT released
-    with pytest.raises(browserlease.OwnershipRefused):
-        browser.session(B)
-
-    # Now an honest teardown: destruction verified, lease released.
-    honest = StubTransport(honest=True)
-    browser._session = browser.BrowserSession(honest, owner=A)
-    assert browser.relinquish(A) == ""
-    assert browserlease.current() is None
+    if honest:
+        assert out == '' and browserlease.current() is None
+        assert transport._closed and not transport._browser.is_connected()
+    else:
+        assert out.startswith('Error: ownership retained')
+        assert browserlease.current()['owner'] == A
+        with pytest.raises(browserlease.OwnershipRefused):
+            browser.session(B)
+        assert 'unconfirmed' in browser.relinquish(A)
+        assert not transport._closed and transport._browser.is_connected()
 
 
 def test_autolaunch_release_requires_exact_termination_and_deletion(
@@ -1153,12 +1164,8 @@ def test_autolaunch_release_requires_exact_termination_and_deletion(
         def wait(self, timeout=None): return 0
 
     proc = StubProc()
-    _fake()
+    _stub_kind(monkeypatch, browser.AUTOLAUNCH, browser.FakeTransport())
     browser.session(A)
-    with browserlease._lock():
-        rec = browserlease._read()
-        rec["transport"] = browser.AUTOLAUNCH
-        browserlease._write(rec)
     browser._launched = (proc, "http://127.0.0.1:9222", str(profile))
 
     assert browser.relinquish(A) == ""
@@ -1181,12 +1188,8 @@ def test_autolaunch_release_retains_lease_when_termination_fails(
         def kill(self): pass
         def wait(self, timeout=None): return None
 
-    _fake()
+    _stub_kind(monkeypatch, browser.AUTOLAUNCH, browser.FakeTransport())
     browser.session(A)
-    with browserlease._lock():
-        rec = browserlease._read()
-        rec["transport"] = browser.AUTOLAUNCH
-        browserlease._write(rec)
     browser._launched = (WedgedProc(), "http://127.0.0.1:9222", str(profile))
 
     out = browser.relinquish(A)
@@ -1213,12 +1216,8 @@ def test_autolaunch_release_retains_lease_when_profile_deletion_fails(
         raise OSError("profile is locked")
     monkeypatch.setattr("shutil.rmtree", boom)
 
-    _fake()
+    _stub_kind(monkeypatch, browser.AUTOLAUNCH, browser.FakeTransport())
     browser.session(A)
-    with browserlease._lock():
-        rec = browserlease._read()
-        rec["transport"] = browser.AUTOLAUNCH
-        browserlease._write(rec)
     browser._launched = (DeadProc(), "http://127.0.0.1:9222", str(profile))
 
     out = browser.relinquish(A)
@@ -1337,7 +1336,9 @@ def test_session_requires_an_explicit_principal():
     background job would end up owning somebody's logged-in browser."""
     import inspect
     sig = inspect.signature(browser.session)
-    assert list(sig.parameters) == ["owner"]
+    assert list(sig.parameters) == ["owner", "_authority"]
+    assert sig.parameters['_authority'].kind is inspect.Parameter.KEYWORD_ONLY
+    assert sig.parameters['_authority'].default is None
     assert sig.parameters["owner"].default is inspect.Parameter.empty
     with pytest.raises(TypeError):
         browser.session()
@@ -1364,19 +1365,24 @@ def test_same_owner_keeps_full_use_of_the_browser(monkeypatch):
 
 
 @pytest.mark.requires_crypto
-def test_same_owner_cookie_roundtrip_still_works(monkeypatch):
-    from olympus import vault
+@pytest.mark.parametrize('owner', ['cli', 'u:customer@example.test'])
+def test_same_owner_cookie_roundtrip_still_works(monkeypatch, owner):
+    assert browserlease.is_trusted(owner) and not memory.is_ambiguous_gateway_owner(owner)
+    from olympus import prefs, vault
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-test-passphrase")
-    monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
-    monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+    monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
+    monkeypatch.delenv("OLYMPUS_OPERATOR_DOMAINS", raising=False)
+    prefs.set(owner, "operator", {"enabled": True, "sites": {"shop.com": {"login": "remember"}}})
     _fake()
-    sess = _own_as(A)
+    sess = _own_as(owner)
     sess.set_cookies([{"name": "sid", "value": "xyz", "domain": "shop.com"}])
-    assert "Saved the shop.com session" in operator.save_auth(A, "shop.com")
+    saved = operator.save_auth(owner, "shop.com")
+    assert "vault=confirmed" in saved and "Completed." in saved
 
-    browser.reset()                                # reconnect, still owned by A
-    assert "Restored the shop.com session" in operator.restore_auth(A, "shop.com")
-    assert browser.session(A).get_cookies("shop.com")[0]["value"] == "xyz"
+    browser.reset()                                # reconnect, still owned by the exact principal
+    restored = operator.restore_auth(owner, "shop.com")
+    assert "injection=confirmed" in restored and "Completed." in restored
+    assert browser.session(owner).get_cookies("shop.com")[0]["value"] == "xyz"
 
 
 def test_background_operator_job_runs_as_its_durable_owner(monkeypatch):
@@ -1404,3 +1410,208 @@ def test_background_operator_job_runs_as_its_durable_owner(monkeypatch):
                           "params": {}, "_user": B})
     assert browserlease.REFUSAL in str(excinfo.value) or \
         "isn't an authorized site" in str(excinfo.value)
+
+
+# Source-only additions for tests/test_browser_owner_isolation.py.
+# No real browser, SDK, network, or process is constructed by these controls.
+
+class _PlaywrightVerificationTruthForbidden:
+    def __bool__(self):
+        raise AssertionError('verification must not coerce truth values')
+
+
+def _playwright_verification_transport(*, closed=True, result=False,
+                                      verifier='callable', fault_at=None,
+                                      primary=None):
+    events = []
+
+    def checkpoint(stage):
+        events.append(stage)
+        if fault_at == stage:
+            raise primary
+
+    class StubBrowser:
+        @property
+        def is_connected(self):
+            checkpoint('verifier_get')
+            if verifier == 'missing':
+                raise AttributeError('owned missing verifier')
+            if verifier != 'callable':
+                return {'none': None, 'false': False, 'zero': 0,
+                        'empty': '', 'list': [], 'dict': {}}[verifier]
+            return self.probe
+
+        def probe(self):
+            checkpoint('probe')
+            return result
+
+    class StubTransport(browser.FakeTransport):
+        @property
+        def _closed(self):
+            checkpoint('closed_get')
+            return closed
+
+        @property
+        def _browser(self):
+            checkpoint('browser_get')
+            if verifier == 'missing_browser':
+                raise AttributeError('owned missing browser')
+            return browser_object
+
+        def close(self):
+            checkpoint('close')
+
+    browser_object = StubBrowser()
+    return StubTransport(), events
+
+
+def _prepare_playwright_verification_case(monkeypatch, transport):
+    from olympus import browser_credential_authority as authority
+
+    _stub_kind(monkeypatch, browser.PLAYWRIGHT, transport)
+    session = browser.session(A)
+    path = config.MEMORY_DIR / 'browser_lease.json'
+    before = path.read_bytes()
+    release_calls = []
+
+    def forbidden_release(*args, **kwargs):
+        release_calls.append(True)
+        raise AssertionError('unconfirmed destruction must not release ownership')
+
+    monkeypatch.setattr(authority.Authority, '_release', forbidden_release)
+    return session, path, before, release_calls
+
+
+def _assert_playwright_verification_retained(case, transport, events):
+    session, path, before, release_calls = case
+    attempt = browser._release_attempt
+    assert attempt is not None
+    assert attempt.owner == A and attempt.session is session
+    assert attempt.binding is session._credential_binding
+    assert attempt.destruction_started is True
+    assert attempt.destruction_confirmed is False
+    assert attempt.release_started is False
+    assert attempt.release_confirmed is False
+    assert path.read_bytes() == before
+    assert browserlease.current() == json.loads(before)
+    assert release_calls == []
+    assert events.count('close') == 1
+    assert events.count('probe') <= 1
+    observed = list(events)
+    calls = list(transport.calls)
+
+    for _ in range(2):
+        assert browser.relinquish(A) == (
+            'Error: browser destruction completion is unconfirmed; '
+            'ownership release was not attempted.')
+    with pytest.raises(browserlease.OwnershipRefused):
+        browser.relinquish(B)
+    for owner in (A, B):
+        with pytest.raises(browserlease.OwnershipRefused):
+            browser.session(owner)
+    with pytest.raises(browser.BrowserUnavailable):
+        browser.reset()
+
+    profile = browser.SiteProfile(
+        domain='owned.test', login_url='https://owned.test/',
+        username_selector='#username', password_selector='#password',
+        submit_selector='#submit', success_selector='#success')
+    operations = (
+        lambda: session.get_cookies('owned.test'),
+        lambda: session.set_cookies([
+            {'name': 'sid', 'value': 'owned-test-value', 'domain': 'owned.test'}]),
+        lambda: session.login(profile, {
+            'username': 'owned-test-user', 'password': 'owned-test-value'}),
+    )
+    for operation in operations:
+        with pytest.raises(browserlease.OwnershipRefused):
+            operation()
+    assert browser._release_attempt is attempt
+    assert events == observed and transport.calls == calls
+    assert path.read_bytes() == before and release_calls == []
+
+
+@pytest.mark.parametrize('closed', [
+    False, None, 0, 1, 'true', '', [], {},
+    _PlaywrightVerificationTruthForbidden(),
+], ids=['false', 'none', 'zero', 'one', 'text', 'empty', 'list', 'dict',
+        'truth-forbidden'])
+def test_playwright_release_requires_exact_closed_true(monkeypatch, closed):
+    transport, events = _playwright_verification_transport(closed=closed)
+    case = _prepare_playwright_verification_case(monkeypatch, transport)
+    assert browser.relinquish(A) == (
+        'Error: ownership retained; browser destruction completion is unconfirmed.')
+    assert events == ['close', 'closed_get']
+    _assert_playwright_verification_retained(case, transport, events)
+
+
+@pytest.mark.parametrize('verifier', [
+    'missing_browser', 'missing', 'none', 'false', 'zero', 'empty', 'list', 'dict',
+])
+def test_playwright_release_requires_available_callable_verifier(
+        monkeypatch, verifier):
+    transport, events = _playwright_verification_transport(verifier=verifier)
+    case = _prepare_playwright_verification_case(monkeypatch, transport)
+    assert browser.relinquish(A) == (
+        'Error: ownership retained; browser destruction completion is unconfirmed.')
+    expected = ['close', 'closed_get', 'browser_get']
+    if verifier != 'missing_browser':
+        expected.append('verifier_get')
+    assert events == expected
+    _assert_playwright_verification_retained(case, transport, events)
+
+
+@pytest.mark.parametrize('result', [
+    True, None, 0, 1, '', [], {}, _PlaywrightVerificationTruthForbidden(),
+], ids=['true', 'none', 'zero', 'one', 'empty', 'list', 'dict', 'truth-forbidden'])
+def test_playwright_release_requires_exact_disconnected_false(monkeypatch, result):
+    transport, events = _playwright_verification_transport(result=result)
+    case = _prepare_playwright_verification_case(monkeypatch, transport)
+    assert browser.relinquish(A) == (
+        'Error: ownership retained; browser destruction completion is unconfirmed.')
+    assert events == ['close', 'closed_get', 'browser_get', 'verifier_get', 'probe']
+    _assert_playwright_verification_retained(case, transport, events)
+
+
+@pytest.mark.parametrize('kind', [OSError, RuntimeError, AttributeError])
+@pytest.mark.parametrize('fault_at', [
+    'close', 'closed_get', 'browser_get', 'verifier_get', 'probe',
+])
+def test_playwright_release_retains_ordinary_verification_failure(
+        monkeypatch, kind, fault_at):
+    primary = kind('owned-verification-fault')
+    transport, events = _playwright_verification_transport(
+        fault_at=fault_at, primary=primary)
+    case = _prepare_playwright_verification_case(monkeypatch, transport)
+    out = browser.relinquish(A)
+    assert out == (
+        'Error: ownership retained; browser destruction completion is unconfirmed.')
+    assert 'owned-verification-fault' not in out
+    order = ['close', 'closed_get', 'browser_get', 'verifier_get', 'probe']
+    assert events == order[:order.index(fault_at) + 1]
+    _assert_playwright_verification_retained(case, transport, events)
+
+
+@pytest.mark.parametrize('kind', [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('fault_at', [
+    'close', 'closed_get', 'browser_get', 'verifier_get', 'probe',
+])
+def test_playwright_release_preserves_verification_interrupt_identity(
+        monkeypatch, kind, fault_at):
+    primary = kind('owned-verification-interrupt')
+    transport, events = _playwright_verification_transport(
+        fault_at=fault_at, primary=primary)
+    case = _prepare_playwright_verification_case(monkeypatch, transport)
+    with pytest.raises(kind) as raised:
+        browser.relinquish(A)
+    assert raised.value is primary
+    assert raised.value._browser_outcome == {
+        'binding_returned': False,
+        'destruction_started': True,
+        'destruction_confirmed': False,
+        'release_started': False,
+        'release_confirmed': False,
+    }
+    order = ['close', 'closed_get', 'browser_get', 'verifier_get', 'probe']
+    assert events == order[:order.index(fault_at) + 1]
+    _assert_playwright_verification_retained(case, transport, events)

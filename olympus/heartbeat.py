@@ -651,25 +651,22 @@ def tick(state: dict, now: float | None = None) -> list[str]:
 
     if config.BACKUP_EVERY and _due(state, "backup", config.BACKUP_EVERY, now):
         def _job_backup() -> None:
-            from . import backup
-            res = backup.run()
-            if res.get("ok"):
-                where = res.get("via") or ("delivered" if res.get("delivered")
-                                           else "local only")
-                log.append(f"Backup: {res['files']} files, "
-                           f"{res['bytes'] // 1024} KB, "
-                           f"{'encrypted' if res.get('encrypted') else 'PLAINTEXT'},"
-                           f" {where}.")
-            else:
-                log.append(f"Backup FAILED at {res.get('stage')}: "
-                           f"{res.get('error')}")
-                gateway.notify_all("⚠️ Olympus backup failed at "
-                                   f"{res.get('stage')}: {res.get('error')}")
+            from . import backup, backup_commands
+            result = backup.run()
+            status = backup_commands.scheduled_status(result)
+            log.append(status['message'])
+            if not status['ok']:
+                try:
+                    gateway.notify_all(status['message'])
+                except Exception:
+                    # Notification failure must not repeat the backup or hide
+                    # the already recorded local stage outcome.
+                    log.append('Backup failure notification was not confirmed.')
 
         try:
             _watch_job("backup", _job_backup)
         except Exception:
-            log.append("Backup errored:\n" + traceback.format_exc())
+            log.append('Backup status unavailable; inspect retained operation evidence before retrying.')
         state["backup"] = now
 
     memory.save_state(state)

@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import datetime
 import json
-import logging
 import os
 import time
 import urllib.error
@@ -45,18 +44,12 @@ def _access_token() -> str:
     OAuth flow (encrypted vault), so each user uses their own mailbox;
     (2) environment-configured token/refresh, for single-user/dev setups.
     """
-    # 1. Per-user OAuth token (multi-user, self-serve connect)
-    try:
-        from . import google_oauth, memory
-        # EXACT principal: this selects WHOSE OAuth token is used to
-        # reach a mailbox. A normalized owner would hand one
-        # principal another's credential.
-        user = memory.current_owner()
-        if google_oauth.connected(user):
-            return google_oauth.access_token(user)
-    except Exception as err:
-        logging.getLogger("olympus.gmail").warning(
-            "OAuth token lookup failed; falling back to env auth: %s", err)
+    # One exact-owner capture. Failed/unavailable OAuth state must not select
+    # cached or environment credentials for a different account.
+    from . import google_oauth, memory
+    token = google_oauth.access_token_if_connected(memory.current_owner())
+    if token is not None:
+        return token
 
     now = time.time()
     if _token["value"] and now < _token["expires"] - 60:

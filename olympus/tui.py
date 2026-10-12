@@ -23,6 +23,7 @@ import sys
 # name → one-line help. Drives /help, Tab-completion, and dispatch.
 COMMANDS: dict[str, str] = {
     "/help": "show this help",
+    "/login": "private sign-in workflow: /login status [workflow-id] or settle|cancel|resume <workflow-id>",
     "/scan": "scan the web for opportunities & world events now",
     "/audit": "Olympus audits and upgrades itself",
     "/watch": "watch a YouTube video and learn from it: /watch <url>",
@@ -125,6 +126,9 @@ def dispatch_command(bot, raw: str):
         return (True, None, True)
     if name == "/help":
         return (True, help_text(), False)
+    if name == "/login":
+        from . import interactive
+        return (True, interactive.login_command(getattr(bot, "user", "cli"), arg), False)
     if name == "/scan":
         from . import orchestrator
         return (True, orchestrator.opportunity_scan(), False)
@@ -617,4 +621,9 @@ def run(pool=None, conversation_id: str = "cli-default") -> None:
             from . import interactive
             interactive.after_turn(getattr(bot, "user", "cli"))
         except Exception:
-            pass
+            # No exception text or private input enters terminal reporting.
+            # The same-process status route retains acknowledged stage facts.
+            try:
+                print("Private interactions need attention; use /login status for retained sign-in facts.")
+            except Exception:
+                pass
