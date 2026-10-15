@@ -9,7 +9,7 @@ from olympus import vault_custody as custody
 
 
 def failure(fault,flag):
-    error=fault('owned-private-material-and-path');error.add_note('owned-private-note')
+    error=fault('owned-private-material-and-path');error.__notes__ = ['owned-private-note']
     if flag:native_cleanup.mark(error)
     return error
 

@@ -1,7 +1,7 @@
 """Bounded, versioned password encryption; no storage or key-custody access.
 
-This M11 foundation is not yet wired into vault/backup callers. Legacy reads
-are explicit and report their lack of authenticated purpose/owner binding.
+Vault records and encrypted note/backup archives share this codec. Legacy
+reads are explicit and report their lack of authenticated purpose/owner binding.
 """
 from __future__ import annotations
 

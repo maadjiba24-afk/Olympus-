@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import io
 import gzip
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import stat
 import threading
 import time
@@ -340,11 +340,23 @@ def encryption_metadata(decoded=None, *, plaintext=False):
             'legacy_unbound':not decoded.context_authenticated}
 
 
+# Portable leaf-only DOS device grammar, independent of the host platform.
+# The enclosing validator already rejects separators, colons, controls and
+# trailing dots/spaces. Trim only ASCII spaces before the first extension.
+_WINDOWS_DEVICE_STEMS = frozenset((
+    'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'COM\u00b9', 'COM\u00b2', 'COM\u00b3',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    'LPT\u00b9', 'LPT\u00b2', 'LPT\u00b3',
+))
+
+
 def _filename(name):
     """One portable Unicode leaf; bound UTF-8 bytes and Windows UTF-16 units."""
     if (type(name) is not str or not name or name in ('.','..')
             or name[-1] in '. ' or any(ord(c) < 32 or c in '<>:"/\\|?*' for c in name)
-            or PureWindowsPath(name).is_reserved()):
+            or name.partition('.')[0].rstrip(' ').upper() in _WINDOWS_DEVICE_STEMS):
         raise ArchiveError('invalid archive output filename')
     try:
         valid = len(name.encode('utf-8')) <= 255 and len(name.encode('utf-16-le')) <= 510

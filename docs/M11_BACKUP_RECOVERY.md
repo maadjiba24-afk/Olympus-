@@ -2,7 +2,8 @@
 
 This describes the isolated M11 implementation. It does not declare full M11
 validation, delivery, deployment qualification or remote backup availability.
-The broader vault and remaining credential caller work is still open.
+The integrated vault and credential caller contracts are documented in
+`M11_VAULT_CONTRACTS.md`.
 
 ## One captured workflow
 

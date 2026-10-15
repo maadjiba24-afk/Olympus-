@@ -293,7 +293,10 @@ def apply_secrets() -> int:
     except Exception:
         failed = True
     except BaseException as exc:
-        exc.add_note("vault configuration hydration interrupted; process environment may be partially updated")
+        # Python 3.10 has no add_note. Do not dispatch exception hooks or
+        # touch existing notes while retaining partial process-environment facts.
+        BaseException.__dict__["__dict__"].__get__(exc)[
+            "_secret_hydration_environment_unconfirmed"] = True
         raise
     if failed:
         raise SecretHydrationError(applied, attempted)

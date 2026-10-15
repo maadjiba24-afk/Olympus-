@@ -22,7 +22,7 @@ def selected(path):
 @pytest.mark.parametrize('fault',[OSError,KeyboardInterrupt,SystemExit])
 @pytest.mark.parametrize('flag',[False,True])
 def test_capture_retains_only_fixed_cleanup_fact_and_actual_interrupt(monkeypatch,fault,flag):
-    error=fault('owned-private-diagnostic');error.add_note('owned-private-note')
+    error=fault('owned-private-diagnostic');error.__notes__ = ['owned-private-note']
     if flag:native_cleanup.mark(error)
     def fail(*args):raise error
     monkeypatch.setattr(custody,'_read_file',fail)

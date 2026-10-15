@@ -266,7 +266,7 @@ print(json.dumps(facts))
                         cleanup.append(type(error).__name__)
         if cleanup:
             if primary is not None:
-                primary.add_note('owned native preference child cleanup is unconfirmed')
+                BaseException.__dict__['__dict__'].__get__(primary)['_owned_child_cleanup_unconfirmed'] = True
             else:
                 raise AssertionError('owned native preference child cleanup is unconfirmed')
 

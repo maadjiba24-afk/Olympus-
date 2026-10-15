@@ -355,7 +355,7 @@ def test_public_cleanup_transport_is_exact_and_redacted(flag,kind):
     operation_id='a'*32
     error=OSError('owned-private-detail') if kind=='ordinary' else recovery.RecoveryError(operation_id,'owned-private-detail')
     error.__dict__['_native_cleanup_unconfirmed']=flag
-    error.add_note('owned-private-note')
+    error.__notes__ = ['owned-private-note']
     guarded=vault._guard(lambda:_raise(error))
     with pytest.raises(vault.VaultError) as failure:guarded()
     assert native_cleanup.unknown(failure.value) is (flag is True)

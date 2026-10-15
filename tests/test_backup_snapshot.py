@@ -54,7 +54,7 @@ def test_hardlinked_source_refuses_before_capture(tmp_path,monkeypatch):
     assert calls==[] and first.read_bytes()==b'owned'
 
 
-@pytest.mark.parametrize('bound',['file_size','aggregate','files','entries','depth'])
+@pytest.mark.parametrize('bound',['file_size','aggregate','files','depth'])
 def test_bounds_refuse_before_extra_source_allocation(tmp_path,monkeypatch,bound):
     calls=[];original=io.read_file
     def read(path,cap,**kwargs):calls.append(path);return original(path,cap,**kwargs)
@@ -67,7 +67,6 @@ def test_bounds_refuse_before_extra_source_allocation(tmp_path,monkeypatch,bound
         if bound=='file_size':monkeypatch.setattr(fmt,'MAX_FILE',3)
         elif bound=='aggregate':monkeypatch.setattr(fmt,'MAX_SOURCE',4)
         elif bound=='files':monkeypatch.setattr(fmt,'MAX_FILES',1)
-        elif bound=='entries':monkeypatch.setattr(snapshot,'MAX_DIRECTORY_ENTRIES',1)
     with pytest.raises(ValueError):collect(tmp_path)
     assert len(calls)==(0 if bound in ('file_size','depth') else 1)
 
@@ -197,3 +196,52 @@ def test_frozen_exclusion_selection_cannot_be_substituted(tmp_path):
     key=tmp_path/'private-key';key.write_bytes(b'owned key')
     captured=snapshot.capture_exclusions(frozenset((key,)))
     with pytest.raises(ValueError):snapshot.check_exclusions(frozenset(),captured)
+
+
+
+@pytest.mark.parametrize('coordination_first', [True, False],
+                         ids=['coordination-first', 'payload-first'])
+def test_entries_bound_refuses_in_both_real_native_inventory_orders(tmp_path, monkeypatch, coordination_first):
+    """Reorder only real retained entries; never assume filesystem iteration order."""
+    from olympus import prefs_native
+    from olympus.native_cleanup import closing as native_closing
+    (tmp_path / 'a').write_bytes(b'1234')
+    (tmp_path / 'b').write_bytes(b'5678')
+    # Establish the same native coordination entry collect() would create.
+    with prefs_native.transaction(tmp_path):
+        pass
+    coordination = prefs_native.coordination_path()
+    assert coordination == ('locks', 'preferences.native.lock')
+    lock = tmp_path.joinpath(*coordination)
+    assert lock.is_file()
+    original_read = io.read_file
+    calls = []
+    def read(path, cap, **kwargs):
+        calls.append(path)
+        return original_read(path, cap, **kwargs)
+    monkeypatch.setattr(io, 'read_file', read)
+    monkeypatch.setattr(snapshot, 'MAX_DIRECTORY_ENTRIES', 1)
+    observed_orders = []
+    with io.operation('backup', selectors={}, capture_key=False):
+        with native_closing(_Directory(tmp_path)) as root:
+            actual_entries = root.entries
+            def ordered_entries():
+                with native_closing(actual_entries()) as iterator:
+                    retained = list(iterator)
+                assert len(retained) == 3
+                by_name = {entry.name: entry for entry in retained}
+                assert set(by_name) == {'a', 'b', 'locks'}
+                order = ('locks', 'a', 'b') if coordination_first else ('a', 'locks', 'b')
+                observed_orders.append(order)
+                for name in order:
+                    root.check()
+                    yield by_name[name]
+                    root.check()
+            monkeypatch.setattr(root, 'entries', ordered_entries)
+            with pytest.raises(ValueError, match='backup directory inventory bound exceeded'):
+                snapshot.collect(root, full=False, excluded=frozenset())
+    assert observed_orders and all(order == observed_orders[0] for order in observed_orders)
+    assert calls == ([] if coordination_first else [tmp_path / 'a'])
+    assert (tmp_path / 'a').read_bytes() == b'1234'
+    assert (tmp_path / 'b').read_bytes() == b'5678'
+    assert lock.is_file()
