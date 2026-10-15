@@ -921,23 +921,33 @@ def test_flow13_queue_full_also_refuses_rather_than_degrading(monkeypatch):
     monkeypatch.setattr(config, "MAX_CONCURRENT_CALLS", 1)
 
     blocker = _Holder(key="tenant-a")
-    blocker.start()
-    assert blocker.entered.wait(3) and blocker.error is None
     waiting = _Holder(key="tenant-b", timeout=5)
-    waiting.start()
-    deadline = time.monotonic() + 3
-    while usage.admission_status()["queued"] != 1:
-        assert time.monotonic() < deadline, "waiter never queued"
+    blocker.start()
+    waiting_started = False
     try:
+        assert blocker.entered.wait(3) and blocker.error is None
+        waiting.start()
+        waiting_started = True
+        deadline = time.monotonic() + 3
+        while usage.admission_status()["queued"] != 1:
+            assert time.monotonic() < deadline, "waiter never queued"
+            # The waiter performs fresh native budget reads before queueing.
+            # Yield the GIL so the observer cannot starve that real work.
+            time.sleep(0.001)
         with pytest.raises(usage.AdmissionRefused) as ei:
             with usage.slot(key="tenant-c", timeout=5):
                 pass
     finally:
+        # Cover failed setup/observation too; no worker survives this fixture.
         blocker.release.set()
-        assert waiting.entered.wait(3)
         waiting.release.set()
         blocker.join(3)
-        waiting.join(3)
+        if waiting_started:
+            waiting.join(3)
+        assert not blocker.is_alive()
+        assert not waiting_started or not waiting.is_alive()
+    assert waiting.entered.is_set() and waiting.error is None
+    assert blocker.error is None
     assert ei.value.reason == "queue_full"
     assert ei.value.retry_after_s > 0          # actionable retry guidance
     assert ei.value.as_dict()["degraded"] is False

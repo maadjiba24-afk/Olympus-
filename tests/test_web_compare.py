@@ -29,9 +29,59 @@ def server(monkeypatch, tmp_path):
         backend, "complete_text_once",
         lambda s, system, messages, effort="high": f"answer from {s.model}")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
+    worker = None
+    start_attempted = False
+    start_confirmed = False
+    primary = None
+    try:
+        worker = threading.Thread(target=srv.serve_forever, daemon=True)
+        start_attempted = True
+        worker.start()
+        start_confirmed = True
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    except BaseException as error:
+        # This preserves fixture setup/interruption errors. Pytest records a
+        # test-call failure independently; it is not thrown into this generator.
+        primary = error
+        raise
+    finally:
+        # Preserve the existing synchronous shutdown semantics, but always try
+        # socket close and a bounded join even if a preceding action fails.
+        errors = []
+        observed_worker = False
+        if worker is not None:
+            try:
+                observed_worker = worker.ident is not None
+            except BaseException as error:
+                errors.append(error)
+        # Never guess that serve_forever began after an interrupted start.
+        actions = [srv.shutdown] if start_confirmed else []
+        actions.append(srv.server_close)
+        if worker is not None and (start_confirmed or observed_worker):
+            actions.append(lambda: worker.join(timeout=5.0))
+        for action in actions:
+            try:
+                action()
+            except BaseException as error:
+                errors.append(error)
+        alive = False
+        if worker is not None:
+            try:
+                alive = worker.is_alive()
+            except BaseException as error:
+                errors.append(error)
+                alive = True
+        if alive:
+            errors.append(RuntimeError("owned HTTP fixture worker did not close"))
+        if start_attempted and not start_confirmed:
+            errors.append(RuntimeError("owned HTTP fixture worker start unconfirmed"))
+        if errors:
+            if primary is not None:
+                primary.__dict__["_owned_server_cleanup_unconfirmed"] = True
+            else:
+                error = errors[0]
+                error.__dict__["_owned_server_cleanup_unconfirmed"] = True
+                raise error
 
 
 def _get(url, path):

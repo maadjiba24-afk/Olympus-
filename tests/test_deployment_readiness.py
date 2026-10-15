@@ -1,8 +1,9 @@
-"""Local/mock contracts for P2A deployment durability readiness.
+"""Owned local readiness controls with no remote recovery qualification.
 
-No test contacts a network service, restarts a real container, or reboots a
-host. Runtime identities, mount detection, disk usage, delivery, and restore are
-all controlled local doubles; the operator procedure collects the real proof.
+No test contacts a network service, restarts a real container or reboots a host.
+Lifecycle identities and mount/disk conditions are mocked. Backup integration
+uses actual owned filesystem publication, encryption and offline restore, with
+uploader dispatch mocked. M14 target-bound remote proof remains unavailable.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from olympus import backup, config, deployreadiness
+import pytest
+from olympus import backup, config, deployreadiness, backup_evidence, backup_workflow
+from test_backup_delivery import owned, uploader, files, native_io as native
 
 
 COMMIT = "a" * 40
@@ -105,31 +108,30 @@ class DeploymentReadinessTests(unittest.TestCase):
 
     def _record_recovery(self, *, delivered=True, encrypted=True, signed=True,
                          restore_sha="b" * 64):
-        backup_sha = "b" * 64
-        deployreadiness.record_backup({
-            "name": "olympus-backup-test.tar.gz.enc",
-            "sha256": backup_sha,
-            "delivered": delivered,
-            "encrypted": encrypted,
-            "signed": signed,
-            "signature_delivered": signed and delivered,
-            "via": "mock-uploader",
-        })
-        deployreadiness.record_restore(
-            {"restored": 3, "signed": True, "signature_ok": True},
-            archive_name="olympus-backup-test.tar.gz.enc",
-            sha256=restore_sha)
+        # Retain the old on-disk schema as an explicit compatibility fixture.
+        # These caller assertions must never qualify the replacement contract.
+        common = {"schema": deployreadiness.SCHEMA, "recorded_at": time.time(), "commit": COMMIT}
+        deployreadiness._atomic_json(deployreadiness.evidence_dir() / deployreadiness.BACKUP_RECEIPT,
+            {**common, "record_type": "backup_receipt", "archive_name": "legacy.enc",
+             "sha256": "b" * 64, "encrypted": encrypted, "signed": signed,
+             "delivered": delivered, "signature_delivered": signed and delivered})
+        deployreadiness._atomic_json(deployreadiness.evidence_dir() / deployreadiness.RESTORE_RECEIPT,
+            {**common, "record_type": "restore_receipt", "archive_name": "legacy.enc",
+             "sha256": restore_sha, "restored_files": 3, "signed": True, "signature_ok": True})
 
-    def test_complete_mock_evidence_is_ready(self):
+    def test_complete_legacy_mock_evidence_cannot_qualify_remote_recovery(self):
         self._record_lifecycle()
         self._record_recovery()
-
+        before = files(self.memory)
         report = deployreadiness.report()
-
-        self.assertTrue(report["ready"], report["problems"])
-        self.assertEqual(report["problems"], [])
-        self.assertTrue(all(item["status"] == "pass"
-                            for item in report["checks"]))
+        self.assertFalse(report["ready"])
+        self.assertEqual({item["name"] for item in report["checks"] if item["status"] != "pass"},
+                         {"recoverable_off_machine_backup", "restore_drill"})
+        self.assertEqual(files(self.memory), before)
+        for name in ("recoverable_off_machine_backup", "restore_drill"):
+            check = self._check(report, name)
+            self.assertFalse(check["remote_recovery_verified"])
+            self.assertTrue(check["local_receipts"]["observational_only"])
 
     def test_placeholder_vault_key_cannot_satisfy_encryption_readiness(self):
         os.environ["OLYMPUS_SECRET_KEY"] = "REPLACE_WITH_RANDOM_HEX"
@@ -137,7 +139,8 @@ class DeploymentReadinessTests(unittest.TestCase):
         check = self._check(deployreadiness.report(), "backup_encryption")
 
         self.assertEqual(check["status"], "fail")
-        self.assertIn("placeholder", check["detail"])
+        self.assertIn("unusable", check["detail"])
+        self.assertNotIn("REPLACE_WITH_RANDOM_HEX", check["detail"])
 
     def test_named_mode_mount_permissions_disk_and_commit_fail_closed(self):
         self.memory_mode = 0o755
@@ -192,7 +195,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                     deployreadiness.DeploymentEvidenceError, "stale"):
                 deployreadiness.verify("container")
 
-    def test_local_plain_or_unsigned_backup_cannot_pass(self):
+    def test_legacy_plain_unsigned_receipts_do_not_qualify(self):
         self._record_lifecycle()
         self._record_recovery(delivered=False, encrypted=False, signed=False)
 
@@ -202,7 +205,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             self._check(report, "recoverable_off_machine_backup")["status"],
             "fail")
 
-    def test_restore_receipt_must_match_delivered_archive(self):
+    def test_legacy_mismatched_restore_receipt_does_not_qualify(self):
         self._record_lifecycle()
         self._record_recovery(restore_sha="c" * 64)
 
@@ -211,7 +214,7 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertEqual(self._check(report, "restore_drill")["status"],
                          "fail")
 
-    def test_malformed_receipt_fails_instead_of_breaking_readiness(self):
+    def test_legacy_malformed_receipt_does_not_qualify_or_break_readiness(self):
         self._record_lifecycle()
         self._record_recovery()
         path = (deployreadiness.evidence_dir()
@@ -226,86 +229,116 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertEqual(self._check(report, "restore_drill")["status"],
                          "fail")
 
+    def test_legacy_receipts_are_never_read_for_qualification_and_remain_intact(self):
+        self._record_lifecycle()
+        self._record_recovery()
+        before = files(self.memory)
+        read_json = deployreadiness._read_json
+        def only_lifecycle(path):
+            self.assertNotIn(path.name, (deployreadiness.BACKUP_RECEIPT, deployreadiness.RESTORE_RECEIPT))
+            return read_json(path)
+        with mock.patch.object(deployreadiness, '_read_json', side_effect=only_lifecycle):
+            report = deployreadiness.report()
+        self.assertFalse(report['ready'])
+        self.assertEqual(files(self.memory), before)
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode contract")
-    def test_evidence_directory_and_receipts_are_private(self):
-        receipt = deployreadiness.record_backup({
-            "name": "x.enc", "sha256": "b" * 64, "encrypted": True,
-            "signed": True, "delivered": True, "signature_delivered": True,
-            "via": "mock"})
-        self.assertEqual(receipt["schema"], deployreadiness.SCHEMA)
+    def test_lifecycle_evidence_directory_and_receipts_are_private(self):
+        self._record_lifecycle()
         directory = deployreadiness.evidence_dir()
-        path = directory / deployreadiness.BACKUP_RECEIPT
         self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        for kind in ("host", "container"):
+            self.assertEqual(deployreadiness._receipt_path(kind).stat().st_mode & 0o777, 0o600)
 
 
-class BackupEvidenceIntegrationTests(unittest.TestCase):
-    def test_run_records_actual_backup_result(self):
-        created = {
-            "path": "/mock/archive.enc", "name": "archive.enc",
-            "sha256": "d" * 64, "encrypted": True, "signed": True,
-            "files": 4, "bytes": 100, "full": False,
-        }
-        with mock.patch.object(backup, "create", return_value=created), \
-             mock.patch.object(backup, "deliver",
-                               return_value={"delivered": True,
-                                             "signature_delivered": True,
-                                             "via": "mock"}), \
-             mock.patch.object(backup, "prune", return_value=0), \
-             mock.patch.object(deployreadiness, "record_backup") as record:
-            result = backup.run()
+@pytest.fixture
+def backup_policy(monkeypatch):
+    monkeypatch.setattr(config, 'backup_keep', lambda: 2)
+    monkeypatch.setattr(config, 'build_info', lambda: {'commit': COMMIT})
 
-        self.assertTrue(result["ok"] and result["evidence_recorded"])
-        record.assert_called_once()
-        self.assertTrue(record.call_args.args[0]["delivered"])
 
-    def test_delivery_sends_archive_and_signature_sidecar(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "archive.tar.gz.enc"
-            sidecar = Path(str(archive) + ".sig.json")
-            archive.write_bytes(b"archive")
-            sidecar.write_text("{}")
-            sent = []
+def test_run_records_actual_stage_results_without_legacy_writer(owned, monkeypatch, backup_policy):
+    def forbidden(*args, **kwargs):
+        pytest.fail('legacy caller-asserted writer used')
+    monkeypatch.setattr(deployreadiness, 'record_backup', forbidden)
+    result = backup.run(deliver_off=False)
+    assert result['ok'] and result['evidence_recorded']
+    observed = backup_evidence.inspect()
+    assert len(observed['receipts']) == 1
+    receipt = observed['receipts'][0]['receipt']
+    assert receipt['publication']['archive_sha256'] == result['sha256']
+    assert receipt['delivery']['status'] == 'explicitly_skipped'
+    assert receipt['remote_retention_verified'] is False
+    assert not native(owned / 'deployment' / deployreadiness.BACKUP_RECEIPT).exists()
 
-            def fake_run(argv, **_kwargs):
-                sent.append(argv[-1])
-                return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-            with mock.patch.object(config, "backup_command",
-                                   return_value="mock-uploader {path}"), \
-                 mock.patch.object(backup.subprocess, "run",
-                                   side_effect=fake_run):
-                result = backup.deliver(str(archive))
+def test_delivery_sends_actual_archive_and_signature_without_remote_claim(owned, monkeypatch, backup_policy):
+    created = backup.create()
+    calls = uploader(monkeypatch)
+    result = backup.deliver(created['path'])
+    assert [row[0] for row in calls] == ['archive', 'signature']
+    image = Path(created['path'])
+    assert calls[0][2] == native(image).read_bytes()
+    assert calls[1][2] == native(image.with_name(image.name + '.sig.json')).read_bytes()
+    assert result['delivery_commands_complete'] is True and result['remote_retention_verified'] is False
 
-        self.assertEqual(sent, [str(archive), str(sidecar)])
-        self.assertTrue(result["delivered"])
-        self.assertTrue(result["signature_delivered"])
 
-    def test_drill_uses_temporary_target_and_records_archive_hash(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "archive.enc"
-            archive.write_bytes(b"mock")
-            seen = {}
+def test_drill_retains_owned_target_and_records_actual_consumed_hash(owned, tmp_path, monkeypatch, backup_policy):
+    created = backup.create()
+    parent = tmp_path / 'retained-drill'
+    def allocate(**kwargs):
+        native(parent).mkdir()
+        return str(parent)
+    def forbidden(*args, **kwargs):
+        pytest.fail('legacy writer or separate archive verification used')
+    monkeypatch.setattr(backup_workflow.tempfile, 'mkdtemp', allocate)
+    monkeypatch.setattr(backup, 'verify_archive', forbidden)
+    monkeypatch.setattr(deployreadiness, 'record_restore', forbidden)
+    result = backup.drill(created['path'])
+    assert result['ok'] and result['restore_complete'] and result['evidence_recorded']
+    assert native(parent / 'restored' / 'data.txt').read_bytes() == b'owned delivery image'
+    assert result['sha256'] == created['sha256'] == result['restore']['consumed_archive_sha256']
+    receipt = backup_evidence.inspect()['receipts'][0]['receipt']
+    assert receipt['restore']['archive_sha256'] == created['sha256']
+    assert receipt['enclosing_workflow_complete'] is False
 
-            def fake_restore(_archive, into=None, **_kwargs):
-                seen["into"] = Path(into)
-                self.assertTrue(seen["into"].exists())
-                return {"restored": 2, "signed": True, "signature_ok": True,
-                        "mismatched": [], "into": str(into)}
 
-            with mock.patch.object(backup, "verify_archive", return_value={
-                    "signed": True, "signature_ok": True,
-                    "sha256": "e" * 64}), \
-                 mock.patch.object(backup, "restore", side_effect=fake_restore), \
-                 mock.patch.object(deployreadiness, "record_restore",
-                                   return_value={"schema": deployreadiness.SCHEMA}) \
-                        as record:
-                result = backup.drill(str(archive))
+@pytest.mark.parametrize('kind', ['backup', 'restore'])
+def test_legacy_writer_refuses_without_coercion_or_files(owned, kind):
+    class NoRead(dict):
+        def get(self, *args, **kwargs):
+            pytest.fail('legacy writer inspected caller data')
+    before = files(owned)
+    with pytest.raises(deployreadiness.DeploymentEvidenceError, match='legacy caller-supplied'):
+        if kind == 'backup':
+            deployreadiness.record_backup(NoRead())
+        else:
+            deployreadiness.record_restore(NoRead(), archive_name='legacy.enc', sha256='a' * 64)
+    assert files(owned) == before
 
-        self.assertFalse(seen["into"].exists())
-        self.assertEqual(result["sha256"], "e" * 64)
-        record.assert_called_once()
-        self.assertEqual(record.call_args.kwargs["sha256"], "e" * 64)
+
+def test_native_receipt_observation_never_claims_workflow_or_remote_recovery(owned, tmp_path, monkeypatch, backup_policy):
+    result = backup.run(deliver_off=False)
+    backup.drill(result['path'], into=tmp_path / 'offline')
+    before = files(owned)
+    observed = deployreadiness._local_backup_observation()
+    assert observed['state'] == 'observed' and observed['visible_receipts'] == {'backup': 1, 'restore': 1}
+    assert observed['observational_only'] is True and observed['write_acknowledgment_observed'] is None
+    for name in ('enclosing_workflow_complete', 'current_archive_availability_verified',
+                 'remote_retention_verified', 'deployment_target_binding_verified'):
+        assert observed[name] is False
+    assert files(owned) == before
+
+
+def test_unavailable_native_evidence_is_generic_and_not_empty(owned, monkeypatch):
+    def unavailable():
+        raise RuntimeError('owned-private-observer-detail')
+    monkeypatch.setattr(backup_evidence, 'inspect', unavailable)
+    result = deployreadiness._local_backup_observation()
+    assert result['state'] == 'unavailable' and 'visible_receipts' not in result
+    assert 'owned-private-observer-detail' not in json.dumps(result)
+    assert result['remote_retention_verified'] is False
+
 
 
 class SurfaceIntegrationTests(unittest.TestCase):
@@ -314,7 +347,9 @@ class SurfaceIntegrationTests(unittest.TestCase):
         cli = (root / "olympus" / "cli.py").read_text(encoding="utf-8")
         web = (root / "olympus" / "web.py").read_text(encoding="utf-8")
         self.assertIn('"deployment", help="evidence-backed', cli)
-        self.assertIn('"--drill"', cli)
+        self.assertIn('backup_commands.add_backup_parser(sub)', cli)
+        from olympus import cli as cli_module
+        self.assertEqual(cli_module.build_parser().parse_args(['backup', '--drill']).drill, '')
         self.assertIn("deployreadiness.report()", web)
         self.assertIn('payload["deployment_readiness"]', web)
 
@@ -333,3 +368,53 @@ class SurfaceIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize('encrypted', [False, True])
+def test_actual_local_command_pair_and_drill_still_cannot_qualify_remote_readiness(owned, tmp_path,
+        monkeypatch, backup_policy, encrypted):
+    if encrypted:
+        monkeypatch.setenv('OLYMPUS_SECRET_KEY', 'owned-readiness-encryption-custody')
+        monkeypatch.delenv('OLYMPUS_BACKUP_ALLOW_PLAINTEXT')
+    calls = uploader(monkeypatch)
+    result = backup.run()
+    drilled = backup.drill(result['path'], into=tmp_path / 'offline')
+    assert result['ok'] and result['delivery_commands_complete'] and drilled['ok']
+    assert result['signer_authenticated'] and not result['signer_default']
+    assert drilled['restore']['signer_authenticated'] and not drilled['restore']['signature_override']
+    for metadata in (result['archive_encryption'], drilled['restore']['archive_encryption']):
+        assert metadata['encrypted'] is encrypted and metadata['context_authenticated'] is encrypted
+        assert metadata['format_version'] == (1 if encrypted else None)
+    assert len(calls) == 2
+    before = files(owned)
+    report = deployreadiness.report()
+    assert not report['ready']
+    for name in ('recoverable_off_machine_backup', 'restore_drill'):
+        check = DeploymentReadinessTests._check(report, name)
+        assert check['status'] == 'fail' and check['remote_recovery_verified'] is False
+        assert check['local_receipts']['visible_receipts'] == {'backup': 1, 'restore': 1}
+        assert check['local_receipts']['deployment_target_binding_verified'] is False
+    assert files(owned) == before and len(calls) == 2
+
+
+def test_actual_corrupt_evidence_is_unavailable_without_overwrite_or_error_text(owned, monkeypatch, backup_policy):
+    result = backup.run(deliver_off=False)
+    path = owned / backup_evidence.CONTROL / ('backup-' + result['requested_operation_id'] + '.json')
+    native(path).write_bytes(b'owned-private-malformed-receipt')
+    before = files(owned)
+    observed = deployreadiness._local_backup_observation()
+    assert observed['state'] == 'unavailable' and 'visible_receipts' not in observed
+    assert 'owned-private-malformed-receipt' not in json.dumps(observed)
+    assert files(owned) == before
+
+
+@pytest.mark.parametrize('interrupt_type', [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('entrypoint', ['_local_backup_observation', 'report'])
+def test_readiness_does_not_swallow_system_interruption(owned, monkeypatch, interrupt_type, entrypoint):
+    original = interrupt_type('owned-private-readiness-interruption')
+    def interrupt():
+        raise original
+    monkeypatch.setattr(backup_evidence, 'inspect', interrupt)
+    with pytest.raises(interrupt_type) as raised:
+        getattr(deployreadiness, entrypoint)()
+    assert raised.value is original

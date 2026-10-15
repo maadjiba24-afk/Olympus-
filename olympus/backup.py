@@ -41,7 +41,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import config, backup_facts as stage_facts
+from . import native_cleanup
 
 SCHEMA = "olympus-backup/1"
 _MANIFEST_NAME = "BACKUP_MANIFEST.json"
@@ -155,90 +156,119 @@ def _included_files(root: Path, *, full: bool) -> list[Path]:
 
 # --- create --------------------------------------------------------------
 
-def create(*, full: bool = False, label: str = "") -> dict:
-    """Build one encrypted, signed backup archive of MEMORY_DIR. Returns a
-    result dict (path, encrypted, signed, files, bytes). Atomic: a half-written
-    archive is never left at the final path."""
-    root = config.MEMORY_DIR
-    _io(root).mkdir(parents=True, exist_ok=True)
-    files = _included_files(root, full=full)
+def create(*, full: bool = False, label: str = "", operation_id: str | None = None) -> dict:
+    """Publish one captured signed pair with a retained recovery operation ID."""
+    return _create(full=full, label=label, operation_id=operation_id)
 
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    name = f"olympus-backup-{stamp}" + (f"-{label}" if label else "")
-    out_dir = _backups_dir()
 
-    manifest = {
-        "schema": SCHEMA,
-        "created": stamp,
-        "olympus_version": _version(),
-        "host": os.uname().nodename if hasattr(os, "uname") else "",
-        "full": full,
-        "file_count": len(files),
-        "files": [{"path": p.relative_to(root).as_posix(),
-                   "sha256": _sha256_file(p),
-                   "bytes": _io(p).stat().st_size} for p in files],
-    }
+def _create(*, full=False, label='', operation_id=None, _authority=None):
+    """Publish one signed pair from the exact bytes captured for its manifest.
 
-    with _LOCK:
-        # 1) Build the .tar.gz into a temp file, then read its bytes.
-        _tmp_fd, _tmp_name = tempfile.mkstemp(prefix=".bk-", suffix=".tar.gz",
-                                              dir=_io(out_dir))
-        os.close(_tmp_fd)          # close the mkstemp fd; tarfile reopens by path
-        tmp_tar = Path(_tmp_name)
-        try:
-            with tarfile.open(tmp_tar, "w:gz") as tar:
-                info = tarfile.TarInfo(_MANIFEST_NAME)
-                mbytes = json.dumps(manifest, indent=2).encode()
-                info.size = len(mbytes)
-                info.mtime = 0
-                import io
-                tar.addfile(info, io.BytesIO(mbytes))
-                for p in files:
-                    arc = "data/" + p.relative_to(root).as_posix()
-                    ti = tar.gettarinfo(str(_io(p)), arcname=arc)
-                    ti.mtime = 0                    # deterministic-ish archive
-                    ti.uid = ti.gid = 0
-                    ti.uname = ti.gname = ""
-                    with _io(p).open("rb") as fh:
-                        tar.addfile(ti, fh)
-            raw = tmp_tar.read_bytes()
-        finally:
-            tmp_tar.unlink(missing_ok=True)
+    A UUID32 operation ID owns the immutable plan and recovery images. Inspect
+    that ID after interruption. A durable active intent can be resumed using
+    retained bytes; pre-intent failures may not be resumable. Do not recreate
+    an interrupted logical operation by reacquiring custody. This copies
+    filesystem memory only, not PostgreSQL.
+    Nonempty historical filename labels are refused for the managed namespace.
+    """
+    from contextlib import nullcontext
+    import uuid
+    from . import archive_io as aio, backup_archive as fmt, backup_signing as signing
+    from . import backup_snapshot as snapshot, backup_publication as publication
+    from .backup_restore import _raise_public_error
+    from .vault_storage import _Directory
+    if type(full) is not bool or type(label) is not str or label:
+        raise BackupError('backup creation requires a boolean full option and an empty filename label')
+    op = uuid.uuid4().hex if operation_id is None else operation_id
+    publication._opid(op)
+    failure = None; result = None; confirmed = ()
+    try:
+        from . import prefs
+        prefs._backup_collection_preflight()
+        if _authority is not None:
+            from .backup_authority import require
+            require(_authority, 'create')
+            _authority.preflight_creation()
+        root_path = aio.selected_directory(config.MEMORY_DIR) if _authority is None else _authority.memory_path
+        selected = ({name:os.environ.get(name) for name in (
+            'OLYMPUS_SECRET_KEY','OLYMPUS_SECRET_KEY_FILE','OLYMPUS_SIGNING_SEED_FILE','OLYMPUS_ENV')}
+            if _authority is None else {**dict(_authority.signing_selection), **dict(_authority.raw_vault_selection)})
+        excluded = snapshot.custody_paths(selected) if _authority is None else _authority.excluded
+        def unchanged():
+            if _authority is not None:
+                require(_authority, 'create')
+                _authority.preflight_creation()
+                return
+            if (aio.selected_directory(config.MEMORY_DIR) != root_path
+                    or any(os.environ.get(name) != value for name,value in selected.items())):
+                raise BackupError('backup configuration changed during creation')
+        # Admission and relative key binding precede signing callbacks; acquire
+        # each private material once before collecting potentially large data.
+        with aio.operation('backup',selectors=selected if _authority is None else _authority.vault_selectors,
+                capture_key=False,cwd=None if _authority is None else _authority.cwd) as session:
+            with (_held_backup_directory(root_path) if _authority is None else nullcontext(_authority.memory)) as root:
+                protected = snapshot.capture_exclusions(excluded) if _authority is None else _authority.exclusion_identities
+                root.check(); unchanged()
+                signer = (signing.capture_signer() if _authority is None else signing.capture_signer(
+                    selection=_authority.signing_selection,cwd=_authority.cwd,policy=_authority.policy))
+                root.check(); unchanged(); snapshot.check_exclusions(excluded,protected)
+                session.select_key()
+                root.check(); unchanged(); snapshot.check_exclusions(excluded,protected)
+                images = snapshot.collect(root,full=full,excluded=excluded,captured_exclusions=protected)
+                stamp = time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())
+                manifest = {'schema':SCHEMA,'created':stamp,'olympus_version':_version(),
+                    'host':'','full':full,'file_count':len(images),
+                    'files':[{'path':name,'sha256':_sha256_bytes(raw),'bytes':len(raw)}
+                             for name,raw in images.items()]}
+                payloads = {'data/'+name:raw for name,raw in images.items()}
+                fmt.validate_inventory(manifest,payloads)
+                encoded = aio.BoundedBuffer(fmt.MAX_MANIFEST)
+                encoder = json.JSONEncoder(sort_keys=True,separators=(',',':'),ensure_ascii=True)
+                for chunk in encoder.iterencode(manifest):
+                    encoded.write(chunk.encode('utf-8'))
+                manifest_bytes = encoded.getvalue()
+                raw = aio.encode_tar([(fmt.MANIFEST,manifest_bytes),*payloads.items()],
+                    max_expanded=fmt.MAX_EXPANDED,max_compressed=aio.MAX_PLAINTEXT)
+                encrypted = session.passphrase is not None
+                payload = session.encrypt(raw) if encrypted else raw
+                digest = _sha256_bytes(payload)
+                sidecar = signer.signature(digest)
+                verification = signer.verify(digest,sidecar)
+                if not verification['signature_ok']:
+                    raise BackupError('captured backup signer did not verify its own signature')
+                unchanged(); root.check(); root._case_spelling('backups')
+                with (_held_backup_directory(root.child('backups',create=True)) if _authority is None
+                      else nullcontext(_authority.backups(create=True))) as destination:
+                    root.check(); unchanged()
+                    receipt = publication.publish(destination,payload,sidecar,
+                        {'encrypted':encrypted,'files':len(images),'full':full},operation_id=op)
+                    confirmed = (stage_facts.ConfirmedStage('publication', receipt['operation_id'],
+                        receipt['archive_sha256'], receipt['signature_sha256'], receipt['plan_sha256']),)
+                    destination.check(); root.check(); unchanged()
+                result = {**receipt,**verification,'sha256':digest,
+                    'archive_encryption':({'encrypted':True,'format_version':1,
+                        'context_authenticated':True,'legacy_unbound':False} if encrypted else
+                        aio.encryption_metadata(plaintext=True)),
+                    'backup_scope':'filesystem_memory_only','database_included':False,
+                    'application_consistent_snapshot':False}
+    except BaseException as error:
+        failure = error
+    if failure is not None:
+        if isinstance(failure,Exception):
+            public = BackupError('backup creation did not complete; retain evidence and inspect its operation ID; no PLAINTEXT fallback')
+            public.operation_id = op
+            if type(failure) is publication.PublicationError:
+                if type(failure.operation_id) is str and publication._ID.fullmatch(failure.operation_id):
+                    public.operation_id = failure.operation_id
+                public.phase = failure.phase
+            stage_facts.carry(failure, public, confirmed)
+            failure = None
+            _raise_public_error(public)
+        stage_facts.carry(failure, failure, confirmed)
+        stage_facts.retain_id(failure, op)
+        raise failure
+    return result
 
-        # 2) Encrypt at rest if the vault key is configured. Fall back to
-        # plaintext ONLY when neither custody source is selected.  `available`
-        # cannot make that distinction: a missing file, ambiguous env+file,
-        # weak deployment key, or broken crypto backend all return False.  A
-        # configured-but-unusable key must refuse rather than silently produce
-        # the plaintext archive the operator explicitly tried to prevent.
-        from . import vault
-        encrypted = False
-        payload = raw
-        suffix = ".tar.gz"
-        if vault.configured():
-            try:
-                payload = vault.encrypt_bytes(raw)
-            except Exception as err:
-                raise BackupError(
-                    "encryption is configured (vault-key source selected) "
-                    "but failed — "
-                    "refusing to write a PLAINTEXT backup of your data: "
-                    f"{err}") from err
-            encrypted = True
-            suffix = ".tar.gz.enc"
-
-        final = out_dir / (name + suffix)
-        tmp_final = out_dir / ("." + name + suffix + ".tmp")
-        from . import atomicio
-        atomicio.publish(_io(tmp_final), _io(final), payload)   # atomic + durable
-
-        # 3) Sign the on-disk archive bytes (tamper-evidence sidecar).
-        digest = _sha256_bytes(payload)
-        signed = _write_signature(final, digest)
-
-    return {"path": str(_io(final)), "name": final.name, "encrypted": encrypted,
-            "signed": signed, "files": len(files), "bytes": len(payload),
-            "sha256": digest, "full": full}
 
 
 def _write_signature(archive: Path, digest: str) -> bool:
@@ -261,273 +291,346 @@ def _write_signature(archive: Path, digest: str) -> bool:
 
 # --- deliver / prune -----------------------------------------------------
 
-def deliver(archive_path: str) -> dict:
-    """Hand the archive to OLYMPUS_BACKUP_CMD for off-droplet delivery. Refuses
-    to ship a plaintext (unencrypted) archive off-machine unless explicitly
-    allowed — that would expose PII/OAuth tokens on third-party storage."""
-    cmd = config.backup_command()
-    if not cmd:
-        return {"delivered": False, "reason": "no OLYMPUS_BACKUP_CMD set "
-                "(backup kept local only)"}
-    # Native file access must not rewrite the caller's external command argument.
-    archive = Path(archive_path)
-    if not _io(archive).exists():
-        raise BackupError(f"archive not found: {archive_path}")
-    if not archive.name.endswith(".enc") and not config.backup_allow_plaintext():
-        return {"delivered": False, "reason": "refusing to deliver an "
-                "UNENCRYPTED archive off-droplet — set OLYMPUS_SECRET_KEY or "
-                "OLYMPUS_SECRET_KEY_FILE to encrypt backups (or "
-                "OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 if the destination is "
-                "itself trusted)."}
-
-    def _send(path: Path, label: str) -> None:
-        if "{path}" in cmd:
-            argv = [a.replace("{path}", str(path)) for a in shlex.split(cmd)]
-        else:
-            argv = shlex.split(cmd) + [str(path)]
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=900)
-        if proc.returncode != 0:
-            raise BackupError(
-                f"{label} delivery command failed (exit {proc.returncode}): "
-                f"{(proc.stderr or proc.stdout or '').strip()[:300]}")
-
-    _send(archive, "archive")
-    # The signature is a separate file. Shipping only the archive would lose
-    # independent authenticity exactly when the source machine is lost. A
-    # signed backup is therefore delivered as an archive+sidecar pair.
-    signature = archive.parent / (archive.name + ".sig.json")
-    signature_delivered = False
-    if _io(signature).exists():
-        _send(signature, "signature sidecar")
-        signature_delivered = True
-    return {"delivered": True, "signature_delivered": signature_delivered,
-            "via": shlex.split(cmd)[0]}
-
-
-def list_backups() -> list[dict]:
-    """Local backup archives, newest first."""
-    out = []
-    for p in _io(_backups_dir()).glob("olympus-backup-*"):
-        if p.name.endswith(".sig.json") or p.name.startswith("."):
-            continue
-        st = p.stat()
-        out.append({"name": p.name, "path": str(p), "bytes": st.st_size,
-                    "mtime": st.st_mtime,
-                    "encrypted": p.name.endswith(".enc")})
-    return sorted(out, key=lambda b: b["mtime"], reverse=True)
-
-
-def prune(keep: int | None = None) -> int:
-    """Keep the newest `keep` local archives (and their signatures); delete the
-    rest. Returns the number of archives removed. Off-droplet copies are not
-    touched — your storage provider's retention governs those."""
-    keep = config.backup_keep() if keep is None else keep
-    archives = list_backups()
-    removed = 0
-    for b in archives[keep:]:
-        Path(b["path"]).unlink(missing_ok=True)
-        Path(b["path"] + ".sig.json").unlink(missing_ok=True)
-        removed += 1
-    return removed
-
-
-def run(*, full: bool = False, deliver_off: bool = True) -> dict:
-    """Create → deliver → prune, as the scheduled backup. Never raises: on
-    failure it captures the error for the operator and returns a status dict, so
-    the heartbeat keeps ticking."""
-    try:
-        res = create(full=full)
-    except Exception as err:
-        from . import errors
-        errors.capture("backup.create", err)
-        return {"ok": False, "stage": "create", "error": str(err)[:300]}
-
-    delivery = {"delivered": False, "reason": "delivery skipped"}
-    if deliver_off:
-        try:
-            delivery = deliver(res["path"])
-        except Exception as err:
-            from . import errors
-            errors.capture("backup.deliver", err, context=res["name"])
-            return {"ok": False, "stage": "deliver", "error": str(err)[:300],
-                    **res}
-    try:
-        pruned = prune()
-    except Exception:
-        pruned = 0
-    result = {"ok": True, "pruned": pruned, **res, **delivery}
-    # The backup itself remains successful if the small local evidence receipt
-    # cannot be written: capture that as a distinct operational fault and leave
-    # deployment readiness fail-closed instead of lying that no archive exists.
-    try:
-        from . import deployreadiness
-        deployreadiness.record_backup(result)
-        result["evidence_recorded"] = True
-    except Exception as err:
-        from . import errors
-        errors.capture("backup.evidence", err, context=res["name"])
-        result["evidence_recorded"] = False
-        result["evidence_error"] = str(err)[:300]
-    return result
+def run(*, full: bool = False, deliver_off: bool = True,
+        operation_id: str | None = None, delivery_id: str | None = None) -> dict:
+    """Run captured local stages once and retain partial progress on failure."""
+    from . import backup_workflow
+    return backup_workflow.run(full=full, deliver_off=deliver_off,
+                               operation_id=operation_id, delivery_id=delivery_id)
 
 
 # --- restore -------------------------------------------------------------
 
-def _safe_members(tar: tarfile.TarFile, dest: Path):
-    """Yield only archive members that extract *inside* dest — rejecting
-    absolute paths, `..` traversal, and symlinks/hardlinks (a maliciously
-    crafted archive must never write outside the restore directory)."""
-    dest = dest.resolve()
-    for m in tar.getmembers():
-        if m.issym() or m.islnk():
-            raise BackupError(f"refusing link member in archive: {m.name}")
-        target = (dest / m.name).resolve()
-        if target != dest and dest not in target.parents:
-            raise BackupError(f"unsafe path in archive (traversal): {m.name}")
-        yield m
-
-
-def verify_archive(archive_path: str) -> dict:
-    """Check an archive's signature (if a sidecar exists) against the pinned/
-    local witness key. Returns {signed, signature_ok, sha256}."""
-    archive = _io(archive_path)
-    digest = _sha256_file(archive)
-    sig_path = archive.parent / (archive.name + ".sig.json")
-    if not sig_path.exists():
-        return {"signed": False, "signature_ok": False, "sha256": digest}
-    sig = json.loads(sig_path.read_text(encoding="utf-8"))
-    ok = False
-    try:
-        from . import witness
-        ok = (sig.get("sha256") == digest and witness.verify_signature(
-            sig.get("publicKey", ""), digest.encode(), sig.get("signature", "")))
-    except Exception:
-        ok = False
-    return {"signed": True, "signature_ok": bool(ok), "sha256": digest,
-            "publicKey": sig.get("publicKey", "")}
-
-
-def restore(archive_path: str, into: str | Path | None = None, *,
-            force: bool = False, insecure: bool = False) -> dict:
-    """Restore an archive into `into` (default: MEMORY_DIR). Verifies the
-    signature and every file's SHA-256, refuses path-traversal entries, and
-    won't overwrite a non-empty target unless `force=True`. Raises BackupError
-    on any integrity failure unless `insecure=True` (signature only)."""
-    archive = _io(archive_path)
-    if not archive.exists():
-        raise BackupError(f"archive not found: {archive_path}")
-    dest = _io(into if into is not None else config.MEMORY_DIR)
-
-    v = verify_archive(str(archive))
-    if v["signed"] and not v["signature_ok"] and not insecure:
-        raise BackupError("archive signature is INVALID — it was altered or "
-                          "signed by a different key. Pass insecure=True to "
-                          "override (not recommended).")
-
-    payload = archive.read_bytes()
-    if archive.name.endswith(".enc"):
-        from . import vault
-        payload = vault.decrypt_bytes(payload)   # raises on wrong key/tamper
-
-    if dest.exists() and any(dest.iterdir()) and not force:
-        raise BackupError(f"refusing to restore into non-empty {dest} — pass "
-                          "force=True to overwrite.")
-    dest.mkdir(parents=True, exist_ok=True)
-
-    import io
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
-        members = list(_safe_members(tar, dest))
-        if hasattr(tarfile, "data_filter"):
-            tar.extractall(dest, members=members, filter="data")
-        else:
-            # Older supported Python versions lack extraction filters.
-            # _safe_members above still blocks path traversal.
-            tar.extractall(dest, members=members)
-
-    # Move the extracted data/ tree into place. Two safety properties:
-    #  1. Every manifest path is checked for traversal — the tar layer is
-    #     guarded by _safe_members, but the manifest drives these moves and is
-    #     equally attacker-controlled, so a `../escape` entry must be rejected
-    #     here too (otherwise os.replace could write above the restore root).
-    #  2. All entries are VERIFIED before ANY file is moved, so a corrupt
-    #     archive can't leave the target half-restored (a mix of new + old).
-    manifest = json.loads((dest / _MANIFEST_NAME).read_text(encoding="utf-8"))
-    data_root = dest / "data"
-    dest_r, data_r = dest.resolve(), data_root.resolve()
-    planned, mismatched = [], []
-    for entry in manifest.get("files", []):
-        rel = entry["path"]
-        src, dst = data_root / rel, dest / rel
+def _backup_boundary(function):
+    """One public failure without native/provider text, chained locals or keys."""
+    from functools import wraps
+    @wraps(function)
+    def guarded(*args,**kwargs):
+        from . import backup_publication as publication, backup_restore as recovery
+        from . import backup_delivery as delivery
+        failure = None
         try:
-            src_r, dst_r = src.resolve(), dst.resolve()
-        except (OSError, RuntimeError):
-            mismatched.append(rel + " (unresolvable path)")
-            continue
-        # Reject any entry whose source or destination escapes its root.
-        if (src_r != data_r and data_r not in src_r.parents) or \
-           (dst_r != dest_r and dest_r not in dst_r.parents):
-            mismatched.append(rel + " (path escapes restore root)")
-            continue
-        if not src.exists():
-            mismatched.append(rel + " (missing)")
-            continue
-        if _sha256_file(src) != entry["sha256"]:
-            mismatched.append(rel + " (hash mismatch)")
-            continue
-        planned.append((src, dst))
-
-    # Only commit the moves when everything verified (unless insecure override).
-    restored = 0
-    if not mismatched or insecure:
-        for src, dst in planned:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(src, dst)
-            restored += 1
-    # tidy the staging tree + manifest copy
-    (dest / _MANIFEST_NAME).unlink(missing_ok=True)
-    _rmtree(data_root)
-
-    if mismatched and not insecure:
-        raise BackupError(f"restore integrity check failed for "
-                          f"{len(mismatched)} file(s): {mismatched[:5]} "
-                          f"— nothing was restored.")
-    return {"restored": restored, "into": str(dest), "mismatched": mismatched,
-            "signature_ok": v["signature_ok"], "signed": v["signed"]}
+            return function(*args,**kwargs)
+        except Exception as error:
+            failure = error
+        public = BackupError('backup '+function.__name__+' did not complete; retain evidence and inspect any operation ID')
+        if type(failure) in (publication.PublicationError,recovery.RestoreError):
+            op = failure.operation_id
+            if type(op) is str and publication._ID.fullmatch(op):public.operation_id = op
+        if type(failure) is publication.PublicationError:
+            completed=getattr(failure,'completed_retirement_ids',None)
+            if (type(completed) is tuple and len(completed)<=publication.MAX_OPERATIONS
+                    and all(type(value) is str and publication._ID.fullmatch(value) for value in completed)):
+                public.completed_retirement_ids=completed
+                public.files_deleted=0
+        if type(failure) is delivery.DeliveryError:
+            for key in ('publication_id', 'delivery_id'):
+                value = getattr(failure, key)
+                if value is None or (type(value) is str and publication._ID.fullmatch(value)):
+                    setattr(public, key, value)
+            public.delivery_progress = dict(failure.delivery_progress)
+        stage_facts.carry(failure, public)
+        failure = None
+        recovery._raise_public_error(public)
+    return guarded
 
 
-def drill(archive_path: str | None = None) -> dict:
-    """Restore one archive into a throwaway directory and record the proof.
+@_backup_boundary
+def deliver(archive_path: str, *, delivery_id: str | None = None) -> dict:
+    """Attempt one journaled archive/signature command pair without retry.
 
-    The live ``MEMORY_DIR`` is never the restore target.  With no explicit
-    archive the newest local backup is used.  The ordinary strict restore path
-    performs signature, extraction, and per-file integrity validation, so this
-    is the same recovery mechanism an operator would use after a loss.
+    Requires a completed managed publication and an authenticated nondefault
+    signer. Explicit plaintext permission affects only the encryption gate.
+    Command completion is not evidence of remote retention or restorability.
     """
-    if archive_path:
-        archive = _io(archive_path)
-    else:
-        backups = list_backups()
-        if not backups:
-            raise BackupError("no local backup is available for a restore drill")
-        archive = Path(backups[0]["path"])
-    if not archive.exists():
-        raise BackupError(f"archive not found: {archive}")
+    from . import backup_delivery
+    return backup_delivery.deliver(archive_path, delivery_id=delivery_id)
 
-    verification = verify_archive(str(archive))
-    with tempfile.TemporaryDirectory(prefix="olympus-restore-drill-") as tmp:
-        result = restore(str(archive), into=Path(tmp))
 
-    from . import deployreadiness
-    receipt = deployreadiness.record_restore(
-        result, archive_name=archive.name, sha256=verification["sha256"])
-    return {
-        "ok": True,
-        "archive": str(archive),
-        "archive_name": archive.name,
-        "sha256": verification["sha256"],
-        "receipt": receipt,
-        **result,
-    }
+@_backup_boundary
+def inspect_delivery(archive_path: str) -> dict:
+    """Observe retained delivery evidence without keys, commands or settlement."""
+    from . import backup_delivery
+    return backup_delivery.inspect_delivery(archive_path)
+
+
+@_backup_boundary
+def list_backups() -> list[dict]:
+    """Observe local states without creating directories or settling receipts."""
+    from . import backup_management
+    return backup_management.list_backups()
+
+
+@_backup_boundary
+def prune(keep: int | None = None) -> dict:
+    """Logically retire old managed pairs; retain all bytes and recovery evidence.
+
+    Returns explicit batch progress and observed prior retirement states.
+    This operation never deletes files or reclaims storage/history capacity.
+    """
+    from . import backup_management
+    return backup_management.retire_backups(keep)
+
+
+def _restore_boundary(operation_id):
+    """Retain this operation ID even if an outer authority's cleanup fails."""
+    from contextlib import contextmanager
+    from . import backup_restore as recovery
+    recovery._opid(operation_id)
+    @contextmanager
+    def held():
+        failure = None
+        confirmed = []
+        try:
+            yield confirmed
+        except BaseException as error:
+            failure = error
+        if failure is not None:
+            public_id = operation_id
+            if type(failure) is recovery.RestoreError:
+                candidate = failure.operation_id
+                if type(candidate) is str and recovery._ID.fullmatch(candidate):public_id = candidate
+            if isinstance(failure,Exception):
+                public = recovery.RestoreError(public_id)
+                stage_facts.carry(failure, public, tuple(confirmed))
+                failure = None
+                recovery._raise_public_error(public)
+            stage_facts.carry(failure, failure, tuple(confirmed))
+            stage_facts.retain_id(failure, public_id)
+            raise failure
+    return held()
+
+
+def _held_backup_directory(path):
+    """Drain a new directory or transferred child; preserve primary failure.
+
+    An exact internal _Directory transfers its ownership to this context.
+    Do not pass a borrowed workflow authority here.
+    """
+    from contextlib import contextmanager
+    from .vault_storage import _Directory
+    @contextmanager
+    def held():
+        directory,failure = None,None
+        try:
+            directory = path if type(path) is _Directory else _Directory(path)
+            yield directory
+            directory.check()
+        except BaseException as error:
+            failure = error
+        finally:
+            if directory is not None:
+                owned, directory = directory, None
+                try:native_cleanup.drain([owned.close], failure)
+                except BaseException as error:failure = error
+        if failure is not None:raise failure
+    return held()
+
+
+def _read_pair(archive, *, external, _authority=None):
+    """Keep original input authorities until all consumption and writes finish.
+
+    External mode explicitly accepts an off-machine copy without its journal;
+    it makes no claim about local publication or retirement. Historical
+    unreserved names carry legacy provenance. Reserved names require a local
+    completed publication unless external mode was explicitly selected.
+    """
+    from contextlib import contextmanager, nullcontext
+    from . import archive_io as aio, backup_archive as fmt, backup_publication as publication
+    from .vault_storage import _Directory
+    if type(external) is not bool:raise BackupError('invalid external archive selection')
+    captured_parent = None
+    if _authority is not None:
+        from .backup_authority import require
+        require(_authority, 'restore')
+        if archive.parent == _authority.memory_path / 'backups':
+            captured_parent = _authority.backups()
+            if captured_parent is None:
+                raise BackupError('the captured backup input directory was absent')
+    @contextmanager
+    def held():
+        if publication.managed_name(archive.name) and not external:
+            failure = None
+            try:
+                with publication.locked(archive.parent if captured_parent is None else captured_parent) as root:
+                    raw,signature,receipt = publication.read_completed(root,archive.name)
+                    local = {'kind':'local_completed','operation_id':receipt['operation_id'],
+                        'plan_sha256':receipt['plan_sha256'],'archive_sha256':receipt['archive_sha256'],
+                        'signature_sha256':receipt['signature_sha256']}
+                    root.check()
+                    try:
+                        yield raw,signature,local,(root.root,root.control),root
+                        root.check()
+                    except BaseException as error:
+                        # Preserve the consumer's recovery ID across the input
+                        # publication boundary and any secondary cleanup fault.
+                        failure = error
+            except BaseException as error:
+                if failure is None:failure = error
+                else:stage_facts.carry(error, failure, stage_facts.observed(failure))
+            if failure is not None:raise failure
+        else:
+            with (_held_backup_directory(archive.parent) if captured_parent is None else nullcontext(captured_parent)) as directory:
+                raw = aio.read_file(archive,aio.MAX_CIPHERTEXT)
+                directory.check()
+                signature = aio.read_file(archive.with_name(archive.name+'.sig.json'),fmt.MAX_SIGNATURE,optional=True)
+                directory.check()
+                yield raw,signature,{'kind':'external_pair' if external else 'legacy_local'},(directory,),None
+                directory.check()
+    return held()
+
+
+def _verification(raw, signature, publication, policy):
+    from . import backup_signing as signing
+    digest = _sha256_bytes(raw)
+    result = signing.capture_verifier(signature,policy=policy).verify(digest,signature)
+    return {**result,'sha256':digest,'local_publication':publication}
+
+
+@_backup_boundary
+def verify_archive(archive_path: str, *, external: bool = False) -> dict:
+    """Verify one captured archive/signature image; do not claim restoration."""
+    from . import archive_io as aio, backup_signing as signing
+    selection,cwd = signing._selection(),os.getcwd()
+    archive = aio.selected_path(archive_path)
+    with aio.operation('backup',capture_key=False):
+        policy = signing.capture_policy(selection=selection,cwd=cwd)
+        with _read_pair(archive,external=external) as (raw,signature,publication,_directories,_lease):
+            return {**_verification(raw,signature,publication,policy),
+                'verification_scope':'signature_of_captured_archive_bytes',
+                'decryption_verified':False,'manifest_integrity_verified':False}
+
+
+def _restore_result(receipt):
+    """Only the exact consumed digest and retained decisions reach the report."""
+    evidence = receipt['evidence']
+    decision = evidence.get('backup_verification',{
+        'signer_authenticated':False,'signer_trust':'not_recorded_in_legacy_restore_plan',
+        'local_publication':{'kind':'not_recorded'}})
+    return {**receipt,**decision,'mismatched':[],
+        'sha256':evidence['archive_sha256'],'consumed_archive_sha256':evidence['archive_sha256'],
+        'signature_sha256':evidence['signature_sha256'],'signed':evidence['signed'],
+        'signature_ok':evidence['signature_ok'],'signature_override':evidence['signature_override'],
+        'archive_encryption':evidence['archive_encryption'],
+        'restore_complete':True,'backup_scope':'filesystem_memory_only',
+        'application_consistent_snapshot':False,'database_included':False}
+
+
+@_backup_boundary
+def restore(archive_path: str, into: str | Path | None = None, *, force: bool = False,
+            insecure: bool = False, external: bool = False, operation_id: str | None = None) -> dict:
+    """Verify one consumed image and restore into an explicit offline target."""
+    return _restore(archive_path, into=into, force=force, insecure=insecure,
+                    external=external, operation_id=operation_id)
+
+
+def _restore(archive_path, into=None, *, force=False, insecure=False, external=False,
+             operation_id=None, _authority=None):
+    """Verify/decode ALL images before preparing an explicit offline restore.
+
+    Force permits only another operation in an intact restore-owned root.
+    Insecure overrides a well-formed signature decision only; custody, archive
+    bounds, path rules and integrity remain mandatory.
+    """
+    from contextlib import nullcontext
+    import uuid
+    from . import archive_io as aio, backup_archive as fmt, backup_restore as recovery
+    from . import backup_snapshot as snapshot, backup_signing as signing
+    from .vault_storage import _Directory
+    if (into is None or type(force) is not bool or type(insecure) is not bool
+            or type(external) is not bool):
+        raise BackupError('restore requires an explicit offline destination and boolean options')
+    op = uuid.uuid4().hex if operation_id is None else operation_id
+    recovery._opid(op)
+    if _authority is not None:
+        from .backup_authority import require
+        require(_authority, 'restore')
+    selection,cwd = ((signing._selection(),os.getcwd()) if _authority is None else
+                     (_authority.signing_selection,_authority.cwd))
+    with _restore_boundary(op) as confirmed:
+        archive = aio.selected_path(archive_path) if _authority is None else _authority.bind_file(archive_path)
+        destination = aio.selected_directory(into) if _authority is None else _authority.bind_directory(into)
+        live_path = aio.selected_directory(config.MEMORY_DIR) if _authority is None else _authority.memory_path
+        selected = ({name:os.environ.get(name) for name in (
+            'OLYMPUS_SECRET_KEY','OLYMPUS_SECRET_KEY_FILE','OLYMPUS_SIGNING_SEED_FILE','OLYMPUS_ENV')}
+            if _authority is None else {**dict(_authority.signing_selection), **dict(_authority.raw_vault_selection)})
+        excluded = snapshot.custody_paths(selected) if _authority is None else _authority.excluded
+        def unchanged():
+            if _authority is not None:
+                require(_authority, 'restore')
+                return
+            signing._check_selection(selection)
+            if (aio.selected_directory(config.MEMORY_DIR)!=live_path
+                    or any(os.environ.get(name)!=value for name,value in selected.items())):
+                raise BackupError('backup restore selection changed during validation')
+        with aio.operation('backup',selectors=selected if _authority is None else _authority.vault_selectors,
+                capture_key=False,cwd=None if _authority is None else _authority.cwd) as session:
+            with (_held_backup_directory(live_path) if _authority is None else nullcontext(_authority.memory)) as live:
+                policy = signing.capture_policy(selection=selection,cwd=cwd) if _authority is None else _authority.policy
+                live.check();unchanged()
+                with _read_pair(archive,external=external,_authority=_authority) as (raw,signature,publication,directories,lease):
+                    verified = _verification(raw,signature,publication,policy)
+                    live.check();unchanged()
+                    for directory in directories:directory.check()
+                    if not verified['signature_ok'] and not insecure:
+                        raise BackupError('archive signature is unavailable, invalid or untrusted')
+                    if raw[:2]==b'\x1f\x8b':
+                        payload = raw;encryption = aio.encryption_metadata(plaintext=True)
+                    else:
+                        decoded = session.decrypt(raw)
+                        payload = decoded.data;encryption = aio.encryption_metadata(decoded)
+                    _manifest,changes = fmt.decode(payload)
+                    evidence = {'archive_sha256':verified['sha256'],
+                        'signature_sha256':verified['signature_sha256'],'signed':verified['signed'],
+                        'signature_ok':verified['signature_ok'],
+                        'signature_override':not verified['signature_ok'] and insecure,
+                        'archive_encryption':encryption,
+                        'backup_verification':{key:verified[key] for key in (
+                            'signature_math_valid','signer_trusted','signer_trust','signer_authenticated',
+                            'signer_default','publicKey','local_signing_custody','local_publication')}}
+                    live.check();unchanged()
+                    for directory in directories:directory.check()
+                    receipt = recovery.restore(destination,changes,evidence,operation_id=op,live_root=live,
+                        forbidden=(*excluded,archive,archive.with_name(archive.name+'.sig.json')),
+                        protected_directories=directories,input_lease=lease,force=force)
+                    confirmed.append(stage_facts.ConfirmedStage('restore',receipt['operation_id'],
+                        receipt['evidence']['archive_sha256'],receipt['evidence']['signature_sha256'],receipt['plan_sha256']))
+                    live.check();unchanged()
+                    return _restore_result(receipt)
+
+
+@_backup_boundary
+def resume_restore(into, *, operation_id):
+    """Use retained verified images; never reopen the archive or reacquire keys."""
+    from . import archive_io as aio, backup_restore as recovery, backup_snapshot as snapshot
+    with _restore_boundary(operation_id) as confirmed:
+        destination = aio.selected_directory(into)
+        live = aio.selected_directory(config.MEMORY_DIR)
+        excluded = snapshot.custody_paths(os.environ)
+        with aio.operation('backup',capture_key=False):
+            receipt=recovery.resume(destination,operation_id=operation_id,live_root=live,forbidden=excluded)
+            confirmed.append(stage_facts.ConfirmedStage('restore',receipt['operation_id'],
+                receipt['evidence']['archive_sha256'],receipt['evidence']['signature_sha256'],receipt['plan_sha256']))
+            return _restore_result(receipt)
+
+
+@_backup_boundary
+def inspect_restore(into, *, operation_id):
+    """Observe retained evidence without publication or archive/key reads."""
+    from . import archive_io as aio, backup_restore as recovery, backup_snapshot as snapshot
+    with _restore_boundary(operation_id):
+        destination = aio.selected_directory(into)
+        live = aio.selected_directory(config.MEMORY_DIR)
+        excluded = snapshot.custody_paths(os.environ)
+        with aio.operation('backup',capture_key=False):
+            return recovery.inspect(destination,operation_id=operation_id,live_root=live,forbidden=excluded)
+
+
+def drill(archive_path: str | None = None, *, into=None, external: bool = False,
+          operation_id: str | None = None) -> dict:
+    """Restore one image offline and retain its directory and recovery evidence."""
+    from . import backup_workflow
+    return backup_workflow.drill(archive_path, into=into, external=external, operation_id=operation_id)
 
 
 def _rmtree(p: Path) -> None:

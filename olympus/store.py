@@ -86,6 +86,119 @@ class PostgresStore:
         return self._psycopg.connect(self._dsn, autocommit=True)
 
     @contextlib.contextmanager
+    def vault_transaction(self, *, timeout=60.0):
+        """Serialize all vault/recovery rows on one database connection.
+
+        Vault migration spans multiple keys. The namespace-level transaction
+        includes absent rows and recovery copies; it does not move any other
+        filesystem state into PostgreSQL or upgrade other KV callers.
+        """
+        import math
+        import time
+        from .vault_storage import (MAX_BLOB, MAX_KEYS, MAX_KEY_BYTES,
+                                    _address, _cap, _Lease, StorageError)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
+            raise StorageError('invalid vault transaction timeout')
+        lock_id = int.from_bytes(hashlib.sha256(
+            b'olympus-vault-namespace-transaction-v1').digest()[:8], 'big', signed=True)
+        deadline = time.monotonic() + timeout
+        with self._psycopg.connect(self._dsn, autocommit=True,
+                                  connect_timeout=max(1, math.ceil(timeout))) as conn:
+            with conn.transaction():
+                conn.execute("SELECT set_config('statement_timeout', %s, true)",
+                             (str(max(1, math.ceil(timeout * 1000))),))
+                while not conn.execute('SELECT pg_try_advisory_xact_lock(%s)',
+                                       (lock_id,)).fetchone()[0]:
+                    if time.monotonic() >= deadline:
+                        raise StorageError('vault transaction acquisition timed out')
+                    time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+
+                class VaultTransaction:
+                    def __init__(self):
+                        self._lease = _Lease()
+                        self._lease.active = True
+
+                    def _assert_active(self):
+                        self._lease.check()
+
+                    def get(self, namespace, key, cap=MAX_BLOB):
+                        self._assert_active()
+                        _address(namespace, key)
+                        _cap(cap)
+                        row = conn.execute(
+                            'SELECT octet_length(v), CASE WHEN octet_length(v)<=%s '
+                            'THEN v ELSE NULL END FROM olympus_kv WHERE ns=%s AND k=%s',
+                            (cap, namespace, key)).fetchone()
+                        if row is None:
+                            return None
+                        if (len(row) != 2 or type(row[0]) is not int
+                                or not 0 <= row[0] <= cap
+                                or type(row[1]) not in (bytes, bytearray, memoryview)):
+                            raise StorageError('vault ciphertext exceeds its read bound')
+                        size = row[1].nbytes if type(row[1]) is memoryview else len(row[1])
+                        if size != row[0]:
+                            raise StorageError('vault ciphertext length does not match its metadata')
+                        return bytes(row[1])
+
+                    def put(self, namespace, key, data):
+                        self._assert_active()
+                        _address(namespace, key)
+                        if type(data) is not bytes or len(data) > MAX_BLOB:
+                            raise StorageError('invalid vault ciphertext size')
+                        conn.execute(
+                            'INSERT INTO olympus_kv (ns,k,v) VALUES (%s,%s,%s) '
+                            'ON CONFLICT (ns,k) DO UPDATE SET v=EXCLUDED.v',
+                            (namespace, key, data))
+                        if self.get(namespace, key, len(data)) != data:
+                            raise StorageError('vault publication verification failed')
+
+                    def write_new(self, namespace, key, data):
+                        self._assert_active()
+                        _address(namespace, key)
+                        if type(data) is not bytes or len(data) > MAX_BLOB:
+                            raise StorageError('invalid vault recovery size')
+                        conn.execute('INSERT INTO olympus_kv (ns,k,v) VALUES (%s,%s,%s)',
+                                     (namespace, key, data))
+                        if self.get(namespace, key, len(data)) != data:
+                            raise StorageError('vault recovery verification failed')
+
+                    def delete(self, namespace, key):
+                        self._assert_active()
+                        _address(namespace, key)
+                        conn.execute('DELETE FROM olympus_kv WHERE ns=%s AND k=%s',
+                                     (namespace, key))
+
+                    def keys(self, namespace, cap=MAX_KEYS):
+                        self._assert_active()
+                        _address(namespace, 'enumeration')
+                        _cap(cap, MAX_KEYS)
+                        rows = conn.execute(
+                            'SELECT octet_length(k), CASE WHEN octet_length(k)<=%s '
+                            'THEN k ELSE NULL END FROM olympus_kv WHERE ns=%s '
+                            'ORDER BY k LIMIT %s',
+                            (MAX_KEY_BYTES, namespace, cap + 1)).fetchall()
+                        if len(rows) > cap:
+                            raise StorageError('vault namespace exceeds enumeration bound')
+                        keys = []
+                        for row in rows:
+                            if (len(row) != 2 or type(row[0]) is not int
+                                    or not 1 <= row[0] <= MAX_KEY_BYTES):
+                                raise StorageError('vault key exceeds its transfer bound')
+                            _address(namespace, row[1])
+                            if len(row[1]) != row[0]:  # canonical keys are ASCII
+                                raise StorageError('vault key length does not match its metadata')
+                            keys.append(row[1])
+                        if len(set(keys)) != len(keys):
+                            raise StorageError('duplicate vault key in transaction result')
+                        return keys
+
+                tx = VaultTransaction()
+                try:
+                    yield tx
+                finally:
+                    tx._lease.active = False
+
+    @contextlib.contextmanager
     def owner_transaction(self, ns: str, key: str):
         """Serialize a bounded owner's snapshot RMW on the database itself.
 

@@ -2,6 +2,8 @@
 never by touching env vars or a CLI. Per-user, persisted in prefs.
 """
 
+import hashlib
+
 import pytest
 
 from olympus import (actions, browser, builtin_actions, config, memory,  # noqa: F401
@@ -32,10 +34,18 @@ def _isolate(tmp_path, monkeypatch):
 
 # --- off by default, friendly refusals ------------------------------------
 
-def test_operator_off_by_default():
-    assert operator.enabled("cli") is False
-    assert "set it up" in tools._browser_login("amazon.com").lower()
-    assert "off" in tools._operator_status().lower()
+def test_operator_off_by_default(monkeypatch):
+    from olympus import vault
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append('dispatch')
+        pytest.fail('disabled operator reached vault or transport')
+    monkeypatch.setattr(vault, 'snapshots', forbidden)
+    browser.set_transport_factory(forbidden)
+    assert operator.enabled('cli') is False
+    assert tools._browser_login('off-by-default.test') == 'Error: the site is not authorized for this operation.'
+    assert calls == []
+    assert 'off' in tools._operator_status().lower()
 
 
 # --- conversational authorize turns it on (no env, no CLI) -----------------
@@ -90,16 +100,34 @@ def test_operate_works_without_env_after_authorize(monkeypatch):
 
 # --- 'remember' mode stores creds in the vault, switches login mode --------
 
-def test_remember_credentials_uses_vault(monkeypatch):
-    stored = {}
-    monkeypatch.setattr(operator, "_settings", operator._settings)  # real prefs
-    from olympus import vault
-    monkeypatch.setattr(vault, "available", lambda: True)
-    monkeypatch.setattr(vault, "put",
-                        lambda u, n, v: stored.__setitem__((u, n), v))
-    operator.remember_credentials("cli", "bank.com", "alice", "s3cret")
-    assert stored[("cli", "site:bank.com")]["username"] == "alice"
-    assert operator.login_mode("cli", "bank.com") == "remember"
+def test_remember_credentials_uses_vault(owned_operator_capture):
+    from olympus import prefs, securecapture, store, vault
+    root, owner, site = owned_operator_capture
+    assert operator.enabled(owner) is False
+    request_id = securecapture.request(owner, site)
+    ready = securecapture.begin(owner)
+    assert ready['request_id'] == request_id and ready['state'] == 'ready'
+    assert ready['claim'] == 'confirmed' and ready['prompt_dispatched'] is False
+    assert operator.enabled(owner) is False
+    prompting = securecapture.start_prompt(owner, ready['workflow_id'])
+    assert prompting['state'] == 'prompting' and prompting['prompt_dispatched'] is True
+    assert operator.enabled(owner) is False
+    facts = operator.remember_credentials(owner, site, 'owned-user', _CAPTURE_PASSWORD,
+                                          workflow_id=ready['workflow_id'])
+    assert facts == securecapture.status(owner, ready['workflow_id'])
+    assert facts['state'] == 'complete' and facts['complete'] is True
+    assert facts['busy'] is False and facts['cleanup_unconfirmed'] is False
+    assert all(facts[name] == 'confirmed' for name in ('claim', 'saving', 'vault', 'authorization'))
+    assert prefs.get(owner, 'pending_secure_login') is None
+    assert operator.enabled(owner) is True and operator.login_mode(owner, site) == 'remember'
+    with vault.storage.transaction(store.FileStore(), root) as transaction:
+        blob = transaction.get(vault._NS, vault._key(owner), cap=vault._ROW_CAP)
+    assert type(blob) is bytes and blob
+    assert all(secret.encode() not in blob for secret in (_CAPTURE_KEY, _CAPTURE_PASSWORD))
+    entries, metadata = vault.records.decode(owner, blob, _CAPTURE_KEY.encode())
+    assert metadata.context_authenticated
+    assert entries == {f'site:{site}': {'username': 'owned-user', 'password': _CAPTURE_PASSWORD}}
+    assert all(secret not in repr(facts) for secret in (_CAPTURE_KEY, _CAPTURE_PASSWORD))
 
 
 # --- the new tools stay bound to the threat model -------------------------
@@ -118,3 +146,31 @@ def test_hermes_has_onboarding_tools():
     names = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
     assert {"operator_authorize_site", "operator_forget_site",
             "operator_status"} <= names
+
+
+_CAPTURE_KEY = 'owned-operator-capture-fixture-key'
+_CAPTURE_PASSWORD = 'owned-operator-capture-fixture-password'
+
+
+@pytest.fixture
+def owned_operator_capture(_isolate, tmp_path, monkeypatch):
+    from olympus import store
+    for name in ('OLYMPUS_SECRET_KEY_FILE', 'OLYMPUS_DATABASE_URL',
+                 'OLYMPUS_SOVEREIGN', 'OLYMPUS_EGRESS_ALLOWLIST'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('OLYMPUS_SECRET_KEY', _CAPTURE_KEY)
+    monkeypatch.setenv('OLYMPUS_ENV', 'test')
+    monkeypatch.setattr(store, '_backend', store.FileStore())
+    owner = 'owned-operator-' + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16]
+    return tmp_path, owner, 'owned-capture.test'
+
+
+def test_remember_credentials_requires_prepared_prompt(owned_operator_capture):
+    from olympus import securecapture
+    root, owner, site = owned_operator_capture
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    with pytest.raises(securecapture.SecureCaptureError) as caught:
+        operator.remember_credentials(owner, site, 'owned-user', _CAPTURE_PASSWORD)
+    assert _CAPTURE_PASSWORD not in str(caught.value) and _CAPTURE_KEY not in str(caught.value)
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()} == before
+    assert operator.enabled(owner) is False

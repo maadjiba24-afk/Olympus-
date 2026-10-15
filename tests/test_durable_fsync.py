@@ -8,6 +8,9 @@ after the rename proves nothing, because the window being closed is exactly
 
 Both syscalls are monkeypatched at the `os` module, which is where
 `olympus.atomicio` looks them up.
+
+M11 preferences use the target-specific native observer below; the generic
+os.replace tracer remains unchanged for the other stores.
 """
 
 from __future__ import annotations
@@ -113,9 +116,45 @@ def test_identity_revoke_syncs_before_replace(monkeypatch):
 
 
 def test_prefs_set_syncs_before_replace(monkeypatch):
-    events = trace(monkeypatch)
-    prefs.set("shared", "daily_budget", 5)
-    assert_data_synced_before_replace(events, label="prefs.set")
+    """Correlate the real file flush and native replacement of this preference."""
+    from durable_native_probe import NativePublicationProbe, read_image
+    from olympus import prefs_records
+    prefs.set('shared', 'daily_budget', 2)
+    before = prefs.capture('shared')
+    expected = prefs_records.encode({'daily_budget': 5})
+    with monkeypatch.context() as patch:
+        probe = NativePublicationProbe(patch, 'prefs', {before.path: expected})
+        prefs.set('shared', 'daily_budget', 5)
+    probe.assert_published(before.path)
+    raw, identity = read_image(before.path)
+    assert raw == expected and identity != before.identity[:2]
+    assert prefs.get('shared', 'daily_budget') == 5
+    assert prefs.capture('shared').raw == expected
+
+
+@pytest.mark.parametrize('fault_type', [OSError, KeyboardInterrupt, SystemExit],
+                         ids=['io-error', 'keyboard-interrupt', 'system-exit'])
+def test_prefs_failed_staging_flush_keeps_previous_image(monkeypatch, fault_type):
+    from durable_native_probe import NativePublicationProbe, read_image
+    from olympus import prefs_records
+    prefs.set('shared', 'daily_budget', 2)
+    before = prefs.capture('shared')
+    before_image = read_image(before.path)
+    expected = prefs_records.encode({'daily_budget': 5})
+    fault = fault_type('owned preference staging flush fault')
+    category = prefs.PreferenceOperationError if fault_type is OSError else fault_type
+    with monkeypatch.context() as patch:
+        probe = NativePublicationProbe(patch, 'prefs', {before.path: expected},
+                                       fail_target=before.path, failure=fault)
+        with pytest.raises(category) as caught:
+            prefs.set('shared', 'daily_budget', 5)
+    probe.assert_failed_flush(before.path)
+    if fault_type is not OSError:
+        assert caught.value is fault
+    assert read_image(before.path) == before_image
+    assert prefs.get('shared', 'daily_budget') == 2
+    assert prefs.capture('shared').raw == before.raw
+    # A failed exclusive stage may remain. It is not deleted, reused or retried.
 
 
 def test_goals_save_syncs_before_replace(monkeypatch):

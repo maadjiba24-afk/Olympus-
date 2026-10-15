@@ -1801,48 +1801,8 @@ def _browser_exists(selector: str) -> str:
 
 
 def _browser_login(domain: str) -> str:
-    user = _browser_owner()
-    reason = operator._gate(user, domain)         # per-user: env OR opt-in
-    if reason:
-        return f"Error: {reason}."
-    d = domain.strip().lower()
-    # Manual mode (the consumer default): the person signs in themselves; we
-    # never touch a password. Only short-circuit when they explicitly chose it.
-    if d in operator.sites(user) and operator.login_mode(user, d) == "manual":
-        return (f"{domain} uses manual sign-in. Open it in the browser, log in "
-                "yourself (including any 2FA), then tell me you're ready — I'll "
-                "use that session.")
-    # Remembered mode (or the engineer/env path): auto-login from the vault.
-    profile = browser.get_profile(domain)
-    if profile is None or not profile.login_url:
-        return (f"Error: I don't have a sign-in recipe for '{domain}' yet.")
-    if not vault.available():
-        return "Error: the secure vault is not set up, so I can't auto-sign-in."
-    creds = vault.get(user, f"site:{domain.strip().lower()}")
-    if not isinstance(creds, dict) or not creds.get("username"):
-        return (f"Error: I don't have saved credentials for '{domain}'. Ask me "
-                "to remember your sign-in for it first.")
-    # Signing in plants a live session in the shared browser, so the lease must
-    # be held BEFORE the credentials are used — otherwise one tenant's login
-    # lands in a browser another tenant is driving.
-    sess, err = _owned_session()
-    if err:
-        return err
-    try:
-        ok = sess.login(profile, creds)
-    except browser.BrowserUnavailable as err:
-        return f"No browser attached: {err}"
-    browser.mark_profile_outcome(domain, ok)
-    if ok:
-        # Self-evolving: persist the fresh session so a later run can restore it
-        # instead of logging in again. Best-effort; failure never blocks login.
-        try:
-            operator.save_auth(user, domain)
-        except Exception:
-            pass
-        return f"Logged in to {domain}."
-    return (f"Sign-in to {domain} didn't go through — it may need 2FA/CAPTCHA, "
-            "or the page changed. Want to sign in manually instead?")
+    from . import browser_credentials
+    return browser_credentials.login(_browser_owner(), domain)
 
 
 def _site_profile_record(domain: str, login_url: str = "",
@@ -1963,6 +1923,8 @@ def _operator_authorize_site(domain: str, login: str = "manual") -> str:
     # not a filesystem path (see docs/MEMORY_FORMAT.md).
     user = memory.current_owner()
     login = (login or "manual").strip().lower()
+    if login == "remember":
+        return _operator_remember_login(domain)
     try:
         operator.authorize_site(user, domain, login)
     except ValueError as err:
@@ -2004,18 +1966,15 @@ def _operator_history(limit: int = 20) -> str:
 
 
 def _operator_remember_login(domain: str) -> str:
-    # EXACT principal: authorization / durable-owner sink,
-    # not a filesystem path (see docs/MEMORY_FORMAT.md).
-    user = memory.current_owner()
-    d = (domain or "").strip().lower()
-    if not d:
-        return "Error: which site should I remember the sign-in for?"
-    operator.authorize_site(user, d, "remember")
+    # Request private input for the exact principal; authorization follows confirmed storage.
     from . import securecapture
-    securecapture.request(user, d)
-    return (f"Okay — I'll remember your {d} sign-in. When you continue, a "
-            "private prompt will ask for your username and password; they go "
-            "straight to the encrypted vault and never through our chat.")
+    user = memory.current_owner()
+    try:
+        securecapture.request(user, domain)
+    except securecapture.SecureCaptureError:
+        return 'Private sign-in could not be requested; existing evidence requires reconciliation.'
+    return ('A private prompt will ask for your sign-in outside this conversation. '
+            'Credentials go to the encrypted vault; site authorization follows confirmed storage.')
 
 
 def _recent_learning() -> str:

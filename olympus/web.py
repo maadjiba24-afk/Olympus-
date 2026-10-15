@@ -2575,15 +2575,39 @@ class Handler(BaseHTTPRequestHandler):
                        "text/html; charset=utf-8")
             return
         body = "<p>Google account connected. You can close this tab.</p>"
+        outcome = settlement = None
         if not code:
             body = "<p>Connection cancelled or failed.</p>"
         else:
             try:
                 google_oauth.exchange_code(rec["user"], code)
-            except Exception as err:
-                body = f"<p>Could not connect: {err}</p>"
-        self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),
-                   "text/html; charset=utf-8")
+                outcome = google_oauth._facts(response=True, confirmed=True)
+            except google_oauth.OAuthOutcomeUnknown as err:
+                facts = outcome = err.status()
+                if isinstance(err, google_oauth.OAuthSettlementError):
+                    settlement = err
+                if facts['local_publication_confirmed']:
+                    body = ("<p>Google credentials were saved, but cleanup remains "
+                            "unconfirmed. Account reconciliation is required; do not "
+                            "repeat the authorization request automatically.</p>")
+                elif facts['provider_response_validated']:
+                    body = ("<p>Google returned credentials, but local storage is not "
+                            "confirmed. Account reconciliation is required; do not "
+                            "repeat the authorization request automatically.</p>")
+                else:
+                    body = ("<p>The Google request outcome is unknown. Account "
+                            "reconciliation is required; do not repeat the "
+                            "authorization request automatically.</p>")
+            except Exception:
+                body = "<p>Google connection could not be confirmed. Inspect local credential readiness.</p>"
+        try:
+            self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),
+                       "text/html; charset=utf-8")
+        except BaseException as error:
+            if outcome is not None:
+                google_oauth._attach(error, outcome, handle=settlement)
+                BaseException.__getattribute__(error, '__dict__')['_oauth_reporting_unconfirmed'] = True
+            raise
 
     @_owner_evidence_response
     def do_POST(self) -> None:  # noqa: N802

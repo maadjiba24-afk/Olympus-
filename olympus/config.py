@@ -1871,7 +1871,7 @@ def _deployment_problems(mode: str, *, bind_host: str | None = None,
     from . import vault
     if vault.configured():
         try:
-            vault._fernet()
+            vault.check_ready()
         except Exception as exc:
             problems.append(
                 f"vault encryption key is configured but unusable: {exc}")

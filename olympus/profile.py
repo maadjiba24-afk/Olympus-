@@ -28,30 +28,35 @@ def get(user: str) -> dict:
 
 
 def set_about(user: str, text: str) -> str:
-    """Set the freeform 'about me' note (empty string clears it)."""
-    p = get(user)
-    text = (text or "").strip()
-    if text:
-        p["about"] = text
-    else:
-        p.pop("about", None)
-    prefs.set(user, "profile", p)
-    return "Cleared your profile note." if not text else \
-        "Saved. Olympus will remember this across conversations."
+    """Set the note while preserving concurrently edited structured facts."""
+    text = (text or '').strip()
+    def apply(data):
+        profile = dict(data.get('profile') or {})
+        if text:
+            profile['about'] = text
+        else:
+            profile.pop('about', None)
+        data['profile'] = profile
+        return data
+    prefs.mutate(user, apply)
+    return 'Cleared your profile note.' if not text else 'Saved. Olympus will remember this across conversations.'
 
 
 def set_fact(user: str, key: str, value: str) -> str:
-    """Set or clear one structured fact (e.g. role, company, timezone)."""
-    p = get(user)
-    facts = dict(p.get("facts", {}))
+    """Edit one fact under the same mutex that reads and publishes the profile."""
     key = key.strip().lower()
-    value = (value or "").strip()
-    if value:
-        facts[key] = value
-    else:
-        facts.pop(key, None)
-    p["facts"] = facts
-    prefs.set(user, "profile", p)
+    value = (value or '').strip()
+    def apply(data):
+        profile = dict(data.get('profile') or {})
+        facts = dict(profile.get('facts', {}))
+        if value:
+            facts[key] = value
+        else:
+            facts.pop(key, None)
+        profile['facts'] = facts
+        data['profile'] = profile
+        return data
+    prefs.mutate(user, apply)
     return f"Updated '{key}'." if value else f"Cleared '{key}'."
 
 

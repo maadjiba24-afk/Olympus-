@@ -442,7 +442,7 @@ class FakeTransport:
                     return {"result": {"value": box if sel else ""}}
                 if params.get("returnByValue") is False:   # node handle wanted
                     return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
-                if "__olySel" in expr:            # durable-selector lookup
+                if "__olySel(" in expr:           # durable-selector call, not its definition
                     value: Any = sel or ""        # offline: echo the matched css
                 elif "innerText" in expr:         # selector read → text or ''
                     value = page.get("text", "") if sel else ""
@@ -1485,20 +1485,37 @@ FAKE, PLAYWRIGHT, AUTOLAUNCH, REMOTE_CDP, NONE = (
     "fake", "playwright", "autolaunch", "remote_cdp", "none")
 
 
-def _transport_kind() -> str:
-    """Which transport `_build_transport` would construct, from configuration
-    alone. Pure: no network, no subprocess, no browser inspection."""
-    if _TRANSPORT_FACTORY is not None:
-        return FAKE
+@dataclass(frozen=True, repr=False)
+class _TransportSelection:
+    kind: str
+    factory: object
+    engine: str
+    endpoint: str
+    headless: bool
+    autolaunch: bool
+
+
+def _select_transport() -> _TransportSelection:
+    """Read construction inputs once, without connecting or launching."""
+    factory = _TRANSPORT_FACTORY
+    if factory is not None:
+        return _TransportSelection(FAKE, factory, '', '', False, False)
     engine = _browser_engine()
-    endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
-    if engine != "chromium":
-        return PLAYWRIGHT if _autolaunch_enabled() and not endpoint else NONE
-    if endpoint:
-        return REMOTE_CDP
-    if _autolaunch_enabled():
-        return AUTOLAUNCH
-    return NONE
+    endpoint = os.environ.get('OLYMPUS_BROWSER_CDP_URL', '').strip()
+    headless = os.environ.get('OLYMPUS_BROWSER_HEADLESS', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    autolaunch = _autolaunch_enabled()
+    if engine != 'chromium':
+        kind = PLAYWRIGHT if autolaunch and not endpoint else NONE
+    elif endpoint:
+        kind = REMOTE_CDP
+    else:
+        kind = AUTOLAUNCH if autolaunch else NONE
+    return _TransportSelection(kind, factory, engine, endpoint, headless, autolaunch)
+
+
+def _transport_kind() -> str:
+    """Which transport the current configuration would construct; no I/O."""
+    return _select_transport().kind
 
 
 def _carries_foreign_state(kind: str) -> bool:
@@ -1549,28 +1566,27 @@ def _fingerprint(kind: str) -> str:
         return ""
 
 
-def _build_transport() -> Transport:
-    if _TRANSPORT_FACTORY is not None:
-        return _TRANSPORT_FACTORY()
-
-    engine = _browser_engine()
-    endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
-    headless = os.environ.get("OLYMPUS_BROWSER_HEADLESS", "").strip().lower() \
-        in ("1", "true", "yes", "on")
+def _build_transport(*, _selection=None) -> Transport:
+    selection = _select_transport() if _selection is None else _selection
+    if type(selection) is not _TransportSelection:
+        raise BrowserUnavailable('invalid browser transport selection')
+    if selection.factory is not None:
+        return selection.factory()
+    engine, endpoint, headless = selection.engine, selection.endpoint, selection.headless
 
     if engine != "chromium":
         if endpoint:
             raise BrowserUnavailable(
                 "OLYMPUS_BROWSER_CDP_URL only supports the Chromium engine"
             )
-        if not _autolaunch_enabled():
+        if not selection.autolaunch:
             raise BrowserUnavailable(
                 f"no {engine} browser attached ? set "
                 "OLYMPUS_BROWSER_AUTOLAUNCH=1 to launch it through Playwright"
             )
         return _PlaywrightTransport(engine, headless=headless)
 
-    if not endpoint and _autolaunch_enabled():
+    if not endpoint and selection.autolaunch:
         # Consumer convenience: bring Chromium up automatically so the user
         # never starts it with remote-debugging flags themselves.
         endpoint = launch_local(headless=headless)
@@ -1610,6 +1626,12 @@ class BrowserSession:
         # durable lease so credential handling is guarded at the method itself,
         # not only at the factory that handed the object out.
         self.owner: str = str(owner or "")
+        # Factory sessions receive one immutable native-root/lock/generation
+        # binding. A late factory failure leaves an explicitly unusable object
+        # until reset, so a retry cannot silently build another transport.
+        self._credential_binding = None
+        self._credential_transport_selection = None
+        self._credential_factory_unconfirmed = False
         self.url: str = "about:blank"
         # Every CDP call, in order — the replayable/auditable record. Bounded so
         # a long-lived session can't grow it without limit (like a browser's own
@@ -1699,6 +1721,24 @@ class BrowserSession:
               **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
         return self._t.send(method, params, session_id=_session_id)
+
+    def _call_sensitive(self, method: str, *, _session_id: str | None = None,
+                        **params: Any) -> dict:
+        """Send once while retaining only fixed diagnostic metadata.
+
+        The transport necessarily receives the original payload. This does not
+        hide secrets from transport implementations, debuggers or local memory.
+        Ownership is enforced by the credential operation before this boundary.
+        """
+        self.ledger.append({"method": method, "params": {"redacted": True}})
+        failed = False
+        try:
+            return self._t.send(method, params, session_id=_session_id)
+        except Exception:
+            failed = True
+        if failed:
+            # No transport exception chain containing an expression or cookie.
+            raise BrowserUnavailable('sensitive browser call completion is unconfirmed') from None
 
     def _current_url(self) -> str:
         """The URL actually loaded right now (after any redirect / JS nav)."""
@@ -1892,18 +1932,26 @@ class BrowserSession:
             time.sleep(0.3)
         return "Error: no download completed within the timeout."
 
-    def _require_owner(self) -> None:
-        """Re-check this session's owner against the durable lease.
+    def _require_owner(self, _authority=None) -> None:
+        """Check the factory binding, or the ordinary direct-object test path."""
+        from . import browserlease, browser_credential_authority as lease_authority
+        if self._credential_factory_unconfirmed or _factory_attempt is not None or _release_attempt is not None:
+            raise browserlease.OwnershipRefused()
+        binding = self._credential_binding
+        if binding is None:
+            if _authority is not None:
+                raise browserlease.OwnershipRefused()
+            browserlease.verify(self.owner)
+            return
+        if _authority is None:
+            with lease_authority.capture(binding=binding) as captured:
+                captured.verify(binding, self.owner)
+        else:
+            if type(_authority) is not lease_authority.Authority:
+                raise browserlease.OwnershipRefused()
+            _authority.verify(binding, self.owner)
 
-        Cookie custody is the highest-value operation on the object, and the
-        session can outlive the call that created it (it is a process global).
-        Re-verifying here means a stale reference cannot be used to read or
-        plant credentials after the lease moved on. Raises OwnershipRefused.
-        """
-        from . import browserlease
-        browserlease.verify(self.owner)
-
-    def get_cookies(self, domain: str = "") -> list[dict]:
+    def get_cookies(self, domain: str = "", *, _authority=None) -> list[dict]:
         """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
         just the current frame's), optionally filtered to `domain`. Cookies are
         session credentials — the caller (operator.save_auth) stores them ONLY in
@@ -1915,20 +1963,12 @@ class BrowserSession:
         domain is returned regardless of who signed in. The lease check is what
         stops one tenant harvesting another's cookies into their own vault.
         """
-        self._require_owner()
-        res = self._call("Storage.getCookies")
-        cookies = (res or {}).get("cookies", []) or []
-        d = (domain or "").strip().lower().lstrip(".")
-        if not d:
-            return list(cookies)
-        out = []
-        for c in cookies:
-            cd = str(c.get("domain", "")).lower().lstrip(".")
-            if cd == d or cd.endswith("." + d) or d.endswith("." + cd):
-                out.append(c)
-        return out
+        self._require_owner(_authority)
+        from . import browser_credential_records
+        response = self._call_sensitive('Storage.getCookies')
+        return browser_credential_records.acquired_cookies(response, domain)
 
-    def set_cookies(self, cookies: list[dict]) -> int:
+    def set_cookies(self, cookies: list[dict], *, _authority=None) -> int:
         """Inject cookies (CDP Network.setCookies) to restore a saved session, so
         the operator need not re-login. Returns how many were set.
 
@@ -1936,10 +1976,10 @@ class BrowserSession:
         reachable by anything else driving that browser, so it may only happen
         while the lease is held by the caller these cookies belong to.
         """
-        self._require_owner()
+        self._require_owner(_authority)
         clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
         if clean:
-            self._call("Network.setCookies", cookies=clean)
+            self._call_sensitive("Network.setCookies", cookies=clean)
         return len(clean)
 
     def set_download_dir(self, path: str = "") -> str:
@@ -2319,9 +2359,10 @@ class BrowserSession:
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
 
-    def _eval_bool_in(self, session_id: str, expression: str) -> bool:
-        res = self._call("Runtime.evaluate", _session_id=session_id,
-                         expression=self._prep(expression), returnByValue=True)
+    def _eval_bool_in(self, session_id: str, expression: str, *, sensitive=False) -> bool:
+        call = self._call_sensitive if sensitive else self._call
+        res = call("Runtime.evaluate", _session_id=session_id,
+                   expression=self._prep(expression), returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
 
     def fill_in(self, session_id: str, selector: str, value: str) -> bool:
@@ -2332,7 +2373,7 @@ class BrowserSession:
                 f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
                 f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
                 f"return true;}})()")
-        return self._eval_bool_in(session_id, expr)
+        return self._eval_bool_in(session_id, expr, sensitive=True)
 
     def observe_frame(self, session_id: str, limit: int = _OBSERVE_MAX) -> str:
         """Perceive a cross-origin frame's interactive elements as a numbered map
@@ -2504,7 +2545,7 @@ class BrowserSession:
                 self._journal_step(f"type into {target}")
                 self._recipe_step("fill", selector, "$" + _slug(label or selector))
                 return f"Typed into {selector}."
-            self._call("Input.insertText", text=text)
+            self._call_sensitive("Input.insertText", text=text)
             self._journal_step("type into focused field")
             return f"Typed {len(text)} chars."
         if action == "scroll":
@@ -2645,9 +2686,10 @@ class BrowserSession:
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
 
-    def _eval_bool(self, expression: str) -> bool:
-        res = self._call("Runtime.evaluate", expression=self._prep(expression),
-                         returnByValue=True)
+    def _eval_bool(self, expression: str, *, sensitive=False) -> bool:
+        call = self._call_sensitive if sensitive else self._call
+        res = call("Runtime.evaluate", expression=self._prep(expression),
+                   returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
 
     def _resolve_object_id(self, selector: str) -> str:
@@ -2675,7 +2717,7 @@ class BrowserSession:
                 f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
                 f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
                 f"return true;}})()")
-        return self._eval_bool(expr)
+        return self._eval_bool(expr, sensitive=True)
 
     def run_template(self, steps: list[dict], params: dict | None = None) -> dict:
         """Execute a declarative action template step by step. Supported ops:
@@ -2758,23 +2800,95 @@ class BrowserSession:
         return {"selector": str(best.get("s") or ""),
                 "label": str(best.get("n") or ""), "score": round(best_score, 3)}
 
-    def login(self, profile: "SiteProfile", creds: dict) -> bool:
-        """Drive a declarative login: navigate to the profile's login URL (SSRF/
-        egress gated), fill username/password from `creds`, submit, and verify
-        the success marker. Returns True iff the marker appears. No page prose is
-        read as instructions; the password never leaves this method."""
-        if self.open(profile.login_url).startswith("Error:"):
+    def _credential_destination(self, expected, site, _authority, _policy):
+        """Check observed origin before dispatch; no async-navigation exclusion.
+
+        A browser can still navigate between this probe and the following
+        command. This is not a browser-context lock or a DOM/form-action proof.
+        """
+        from urllib.parse import urlsplit
+        from . import browserlease, browser_credential_records as records
+        from . import browser_credential_policy as policies
+        self._require_owner(_authority)
+        if _policy is not None:
+            if (type(_policy) is not policies.Policy or _policy.owner != self.owner
+                    or _policy.site != site or not _policy.allowed):
+                raise browserlease.OwnershipRefused()
+            _policy.verify(_authority)
+        actual = self._current_url()
+        host = records._url_host(actual)
+        parsed = urlsplit(actual)
+        origin = (parsed.scheme, host, parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80))
+        if (origin != expected or security.url_block_reason(actual)
+                or _policy is not None and not _policy.permits_destination(host)):
+            raise BrowserUnavailable('browser credential destination is unavailable or changed')
+        # The location probe itself is an external callback. Recheck the
+        # original lease/policy after it, before the following credential call.
+        self._require_owner(_authority)
+        if _policy is not None:
+            _policy.verify(_authority)
+
+    def login(self, profile: "SiteProfile", creds: dict, *, _authority=None, _policy=None) -> bool:
+        """Drive one frozen recipe only at its observed original HTTP(S) origin.
+
+        Lease and captured policy are rechecked before credential fields and
+        submission. Returned success is observational; browser commands are
+        not atomic with navigation, DOM changes, or external ownership changes.
+        """
+        from urllib.parse import urlsplit
+        from . import browserlease, browser_credential_records as records
+        from . import browser_credential_policy as policies
+        self._require_owner(_authority)
+        if type(profile) is not SiteProfile:
+            raise records.BrowserCredentialError('browser sign-in recipe is invalid')
+        site = records.domain_name(profile.domain)
+        login_url = records._text(profile.login_url, 4096)
+        host = records._url_host(login_url)
+        if not (host == site or host.endswith('.' + site)):
+            raise records.BrowserCredentialError('browser sign-in recipe is outside its site')
+        parsed = urlsplit(login_url)
+        expected = (parsed.scheme, host, parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80))
+        username_selector, password_selector, submit_selector, success_selector = (
+            records._text(value, 4096, empty=True) for value in
+            (profile.username_selector, profile.password_selector, profile.submit_selector, profile.success_selector))
+        credentials = records.site_bundle(creds)
+        if password_selector and not credentials['password']:
+            raise records.BrowserCredentialError('browser sign-in recipe requires a password')
+        if _policy is not None:
+            if (type(_policy) is not policies.Policy or _policy.owner != self.owner
+                    or _policy.site != site or not _policy.allowed):
+                raise browserlease.OwnershipRefused()
+            _policy.verify(_authority)
+            if not _policy.permits_destination(host):
+                raise BrowserUnavailable('browser credential destination is unavailable or changed')
+        if self.open(login_url).startswith('Error:'):
             return False
-        if profile.username_selector:
-            self.fill(profile.username_selector, str(creds.get("username", "")))
-        if profile.password_selector:
-            self.fill(profile.password_selector, str(creds.get("password", "")))
-        if profile.submit_selector:
-            self.act("click", selector=profile.submit_selector)
+        if username_selector:
+            self._credential_destination(expected, site, _authority, _policy)
+            filled = self.fill(username_selector, credentials['username'])
+            if type(filled) is not bool:
+                raise BrowserUnavailable('browser credential field completion is unconfirmed')
+            if not filled:
+                return False
+        if password_selector:
+            self._credential_destination(expected, site, _authority, _policy)
+            filled = self.fill(password_selector, credentials['password'])
+            if type(filled) is not bool:
+                raise BrowserUnavailable('browser credential field completion is unconfirmed')
+            if not filled:
+                return False
+        if submit_selector:
+            self._credential_destination(expected, site, _authority, _policy)
+            submitted = self.act('click', selector=submit_selector)
+            if type(submitted) is not str:
+                raise BrowserUnavailable('browser credential submission completion is unconfirmed')
+            if submitted.startswith('Error:'):
+                return False
         self._wait_ready()
-        if not profile.success_selector:
+        self._credential_destination(expected, site, _authority, _policy)
+        if not success_selector:
             return True
-        return self.exists(profile.success_selector)
+        return self.exists(success_selector)
 
     @staticmethod
     def _snapshot(title: str, text: str) -> str:
@@ -2785,109 +2899,229 @@ class BrowserSession:
         self._t.close()
 
 
+@dataclass(repr=False)
+class _FactoryAttempt:
+    owner: str
+    root: object
+    root_identity: tuple
+    selection: _TransportSelection
+    transport: object = None
+    wrapper: object = None
+    construction_started: bool = False
+    transport_returned: bool = False
+    claim_confirmed: bool = False
+    binding_confirmed: bool = False
+    close_attempted: bool = False
+    close_confirmed: bool = False
+
+
+@dataclass(repr=False)
+class _ReleaseAttempt:
+    owner: str
+    binding: object
+    session: object
+    destruction_started: bool = False
+    destruction_confirmed: bool = False
+    release_started: bool = False
+    release_confirmed: bool = False
+
+
 _session: BrowserSession | None = None
+_factory_attempt: _FactoryAttempt | None = None
+_release_attempt: _ReleaseAttempt | None = None
 _lock = threading.Lock()
 
 
-def session(owner) -> BrowserSession:
-    """The installation's browser, leased exclusively to `owner`.
+def _attach_browser_outcome(error, *, factory=None, release=None, binding_returned=False):
+    """Attach bounded nonsecret observations, never a transport or raw error."""
+    allowed = ('binding_returned', 'construction_started', 'transport_returned',
+               'claim_confirmed', 'binding_confirmed', 'close_attempted',
+               'close_confirmed', 'wrapper_returned', 'destruction_started',
+               'destruction_confirmed', 'release_started', 'release_confirmed')
+    attributes = BaseException.__getattribute__(error, '__dict__')
+    previous = attributes.get('_browser_outcome') if type(attributes) is dict else None
+    facts = {name: previous[name] for name in allowed
+             if type(previous) is dict and name in previous and type(previous[name]) is bool}
+    facts['binding_returned'] = facts.get('binding_returned') is True or binding_returned is True
+    if factory is not None:
+        for name in ('construction_started', 'transport_returned', 'claim_confirmed',
+                     'binding_confirmed', 'close_attempted', 'close_confirmed'):
+            facts[name] = getattr(factory, name) is True
+        facts['wrapper_returned'] = factory.wrapper is not None
+    if release is not None:
+        for name in ('destruction_started', 'destruction_confirmed', 'release_started', 'release_confirmed'):
+            facts[name] = getattr(release, name) is True
+    attributes = BaseException.__getattribute__(error, '__dict__')
+    if type(attributes) is dict:
+        attributes['_browser_outcome'] = facts
 
-    `owner` is REQUIRED and must be an authenticated principal
-    (`browserlease.require_owner`). There is deliberately no default and no
-    fallback to `memory.current_user()`: the ambient contextvar defaults to
-    "shared", so an implicit default is precisely how the heartbeat — or any
-    new call site whose author did not think about identity — would end up
-    driving somebody's logged-in browser. A missing owner is a TypeError at the
-    call site, which is a bug report; a wrong owner would be a breach.
 
-    Raises `browserlease.OwnershipRefused` when the caller is untrusted or the
-    browser belongs to someone else, and `BrowserUnavailable` when no browser
-    can be built. Tool boundaries translate the former into one constant
-    refusal that discloses nothing about the current owner or page.
+def _capture_credentials(owner):
+    """Select the existing binding before callbacks or first-use creation.
 
-    LOCK ORDER: proclock(browser-lease) OUTER, then `_lock` INNER. Never the
-    reverse — see browserlease's LOCK ORDER note.
+    The browser lock protects selection only and is released before native
+    authority acquisition, preserving lease-lock then browser-lock order.
     """
-    global _session
-    from . import browserlease
+    from . import browserlease, browser_credential_authority as lease_authority
     name = browserlease.require_owner(owner)
-
-    with browserlease._lock():
-        record = browserlease._read()          # raises on a malformed record
-        if record is not None and browserlease.owner_of(record) != name:
+    with _lock:
+        if _factory_attempt is not None or _release_attempt is not None:
             raise browserlease.OwnershipRefused()
+        existing = _session
+        if existing is not None and (existing.owner != name
+                or existing._credential_factory_unconfirmed or existing._credential_binding is None):
+            raise browserlease.OwnershipRefused()
+        binding = None if existing is None else existing._credential_binding
+    return lease_authority.capture(binding=binding, initialize_root=binding is None)
 
-        kind = _transport_kind()
 
-        # UNOWNED + the browser may already hold somebody's session: refuse
-        # before attaching. This is the remote-CDP rule — the documented
-        # "attach to your own browser" setup means the cookie jar predates
-        # Olympus, so first-caller-wins would hand it to whoever asks first.
-        # An operator who intends a specific owner says so with
-        # OLYMPUS_BROWSER_OWNER; that is the only way in.
-        if record is None and _carries_foreign_state(kind):
-            configured = browserlease.configured_owner()
-            if not configured or configured != name:
+def session(owner, *, _authority=None) -> BrowserSession:
+    """Get one browser bound to its original native lease and generation.
+
+    Construction is latched before external dispatch. An unconfirmed attempt
+    cannot cause an implicit second build. Ordinary first use creates and holds
+    the memory root through authority acquisition; bound reuse never creates it.
+    """
+    global _session, _factory_attempt
+    from . import browserlease, browser_credential_authority as lease_authority
+    name = browserlease.require_owner(owner)
+    if _factory_attempt is not None or _release_attempt is not None:
+        raise browserlease.OwnershipRefused()
+    if _authority is None:
+        existing = _session
+        if existing is not None and (existing._credential_factory_unconfirmed
+                or existing._credential_binding is None):
+            raise browserlease.OwnershipRefused()
+        binding = None if existing is None else existing._credential_binding
+        binding_returned = False
+        try:
+            with _capture_credentials(name) as captured:
+                result = session(name, _authority=captured)
+                binding_returned = True
+                return result
+        except BaseException as error:
+            _attach_browser_outcome(error, factory=_factory_attempt, binding_returned=binding_returned)
+            raise
+    if type(_authority) is not lease_authority.Authority:
+        raise browserlease.OwnershipRefused()
+    attempt = None
+    try:
+        with _authority.lock():
+            record = _authority.current()
+            if record is not None and browserlease.owner_of(record) != name:
                 raise browserlease.OwnershipRefused()
-
-        with _lock:
-            if _session is None:
-                # Built BEFORE the claim so a failed build cannot strand a
-                # lease — on the remote path that lease could never be
-                # released, permanently bricking the browser for everyone.
-                transport = _build_transport()
-                _session = BrowserSession(transport, owner=name)
-            elif _session.owner != name:
-                # A session object built for a previous owner (only reachable
-                # if the lease was cleared out from under us). Fail closed.
+            existing = _session
+            if existing is not None:
+                if (existing.owner != name or existing._credential_factory_unconfirmed
+                        or existing._credential_binding is None):
+                    raise browserlease.OwnershipRefused()
+                _authority.verify(existing._credential_binding, name)
+                with _lock:
+                    if (_session is not existing or _factory_attempt is not None
+                            or _release_attempt is not None):
+                        raise browserlease.OwnershipRefused()
+                    return existing
+            selection = _select_transport()
+            kind = selection.kind
+            if kind not in (FAKE, PLAYWRIGHT, AUTOLAUNCH, REMOTE_CDP):
+                raise BrowserUnavailable('no supported browser transport is selected')
+            if record is not None and record.get('transport') != kind:
                 raise browserlease.OwnershipRefused()
-
-        browserlease.claim(name, kind, _fingerprint(kind))
-        return _session
+            if record is None and _carries_foreign_state(kind):
+                configured = browserlease.configured_owner()
+                if not configured or configured != name:
+                    raise browserlease.OwnershipRefused()
+            _authority.check()
+            with _lock:
+                if _session is not None or _factory_attempt is not None or _release_attempt is not None:
+                    raise browserlease.OwnershipRefused()
+                attempt = _FactoryAttempt(name, _authority.root, _authority.root_identity, selection)
+                _factory_attempt = attempt
+                attempt.construction_started = True
+                attempt.transport = _build_transport(_selection=selection)
+                attempt.transport_returned = True
+                candidate = BrowserSession(attempt.transport, owner=name)
+                attempt.wrapper = candidate
+                candidate._credential_factory_unconfirmed = True
+                _session = candidate
+            record = _authority.claim(name, kind)
+            attempt.claim_confirmed = True
+            binding = _authority.bind(name, record)
+            attempt.binding_confirmed = True
+            with _lock:
+                if _session is not candidate or _factory_attempt is not attempt:
+                    raise browserlease.OwnershipRefused()
+                candidate._credential_binding = binding
+                candidate._credential_transport_selection = selection
+                candidate._credential_factory_unconfirmed = False
+                _factory_attempt = None
+            return candidate
+    except BaseException as error:
+        _attach_browser_outcome(error, factory=attempt)
+        raise
 
 
 def reset() -> None:
-    """Disconnect the in-process session. DOES NOT RELEASE OWNERSHIP.
+    """Disconnect local state without releasing its lease.
 
-    This is a reconnect/disconnect primitive, not a teardown. On every
-    transport except Playwright, `close()` merely drops the connection: the
-    autolaunched Chromium keeps running (nothing terminates it, and
-    `launch_local` reuses a live one), and a remote browser is entirely
-    external. Cookies, tabs, and the profile survive, so releasing the lease
-    here would hand a fully credentialed browser to the next caller.
-
-    Ownership ends only through `relinquish()`, which requires verified
-    destruction first.
+    A pending construction's observed transport is closed at most once. An
+    unknown construction or close stays blocked for explicit reconciliation;
+    reset never retries an uncertain close or settles ownership destruction.
     """
-    global _session
+    global _session, _factory_attempt
+    failed = False
     with _lock:
-        if _session is not None:
-            try:
-                _session.close()
-            except Exception:
-                pass
-        _session = None
+        if _release_attempt is not None:
+            raise BrowserUnavailable('browser ownership release requires local settlement')
+        attempt = _factory_attempt
+        if attempt is not None:
+            if (not attempt.transport_returned or attempt.transport is None
+                    or attempt.close_attempted and not attempt.close_confirmed
+                    or _session is not None and _session is not attempt.wrapper):
+                raise BrowserUnavailable('browser construction or disconnect completion is unconfirmed')
+            if not attempt.close_confirmed:
+                attempt.close_attempted = True
+                try:
+                    attempt.transport.close()
+                except (KeyboardInterrupt, SystemExit) as error:
+                    _attach_browser_outcome(error, factory=attempt)
+                    raise
+                except Exception:
+                    failed = True
+                if not failed:
+                    attempt.close_confirmed = True
+            if not failed:
+                _session, _factory_attempt = None, None
+        else:
+            if _session is not None:
+                try:
+                    _session.close()
+                except Exception:
+                    pass
+            _session = None
+    if failed:
+        error = BrowserUnavailable('browser construction or disconnect completion is unconfirmed')
+        _attach_browser_outcome(error, factory=attempt)
+        raise error from None
 
 
 def _verify_playwright_destroyed(transport) -> str:
-    """Close a Playwright context+browser and prove it. Returns "" on success,
-    else a reason. Playwright is the one transport whose close() genuinely
-    destroys state: the context is ephemeral (`new_context`, not
-    `launch_persistent_context`), so there is no profile on disk."""
+    """Close an owned Playwright transport and require explicit verification.
+
+    An unavailable or malformed observation cannot confirm destruction. System
+    interrupts propagate to relinquish(), which retains the original attempt.
+    """
+    reason = "playwright destruction verification is unconfirmed"
     try:
         transport.close()
-    except Exception as err:
-        return f"playwright close failed: {type(err).__name__}"
-    if not getattr(transport, "_closed", False):
-        return "playwright transport did not report itself closed"
-    browser_obj = getattr(transport, "_browser", None)
-    connected = getattr(browser_obj, "is_connected", None)
-    if callable(connected):
-        try:
-            if connected():
-                return "playwright browser is still connected"
-        except Exception:
-            pass                       # a torn-down handle that raises is gone
+        if getattr(transport, "_closed", None) is not True:
+            return reason
+        browser_obj = getattr(transport, "_browser", None)
+        connected = getattr(browser_obj, "is_connected", None)
+        if not callable(connected) or connected() is not False:
+            return reason
+    except Exception:
+        return reason
     return ""
 
 
@@ -2942,75 +3176,95 @@ def _verify_autolaunch_destroyed() -> str:
     return ""
 
 
-def relinquish(owner) -> str:
-    """Release ownership of the browser — the ONLY way a lease ends.
-
-    Destroys the credentialed state first and verifies the destruction; the
-    lease is dropped only if that verification passes. Any failure leaves the
-    lease HELD, because a half-wiped browser handed to the next owner is the
-    exact breach this whole mechanism exists to prevent.
-
-    Returns "" on success, or a bounded administrative message. Raises
-    OwnershipRefused if `owner` is untrusted or does not hold the lease.
-
-    Remote CDP is refused outright: that browser is the operator's own, Olympus
-    did not provision its profile, and wiping someone's personal cookies/cache/
-    tabs is not a thing this code will do. Reassignment there is an operator
-    action (a fresh dedicated profile + OLYMPUS_BROWSER_OWNER).
-    """
-    global _session
+def _settle_browser_release(attempt, captured):
+    """Retry only the retained local lease release, never browser destruction."""
+    global _session, _release_attempt
     from . import browserlease
-    name = browserlease.require_owner(owner)
-
-    # The ENTIRE transaction — validate, destroy, verify, delete — runs inside
-    # one hold of the lease lock. Releasing it around the teardown would
-    # reintroduce the check-then-unlink race: another process could release and
-    # a third could re-claim while we were still tearing down, and our delete
-    # would then remove a live owner's lease.
-    with browserlease._lock():
-        record = browserlease._read()
-        if record is None:
-            return ""                                  # already unowned
-        if browserlease.owner_of(record) != name:
+    if not attempt.destruction_confirmed:
+        raise browserlease.OwnershipRefused()
+    previous_start = attempt.release_started
+    attempt.release_started = True
+    captured._release(attempt.binding, attempt.owner, allow_missing=previous_start)
+    attempt.release_confirmed = True
+    with _lock:
+        if _release_attempt is not attempt or (_session is not None and _session is not attempt.session):
             raise browserlease.OwnershipRefused()
-        # Pin the generation we validated. The delete at the end re-checks it,
-        # so it can only ever remove THIS lease.
-        lease_id = str(record.get("lease_id") or "")
+        _session, _release_attempt = None, None
 
-        kind = str(record.get("transport") or _transport_kind())
-        if kind == REMOTE_CDP:
-            return browserlease.REASSIGN_NOTICE
 
-        with _lock:
-            transport = _session._t if _session is not None else None
-            if kind == PLAYWRIGHT:
-                if transport is not None:
-                    reason = _verify_playwright_destroyed(transport)
+def relinquish(owner) -> str:
+    """Destroy the bound browser once, then settle only its native lease.
+
+    Destruction uncertainty blocks retries. A confirmed destruction followed by
+    an unconfirmed local release retains its original binding for local-only
+    settlement. Missing local state does not prove external destruction.
+    """
+    global _session, _release_attempt
+    from . import browserlease, browser_credential_authority as lease_authority
+    name = browserlease.require_owner(owner)
+    if _factory_attempt is not None:
+        raise browserlease.OwnershipRefused()
+    attempt = _release_attempt
+    if attempt is not None:
+        if attempt.owner != name:
+            raise browserlease.OwnershipRefused()
+        if not attempt.destruction_confirmed:
+            return 'Error: browser destruction completion is unconfirmed; ownership release was not attempted.'
+        try:
+            with lease_authority.capture(binding=attempt.binding) as captured:
+                with captured.lock(binding=attempt.binding):
+                    _settle_browser_release(attempt, captured)
+            return ''
+        except BaseException as error:
+            _attach_browser_outcome(error, release=attempt)
+            raise
+    existing = _session
+    if existing is None:
+        with browserlease._lock():
+            record = browserlease._read()
+            if record is None:
+                return ''
+            if browserlease.owner_of(record) != name:
+                raise browserlease.OwnershipRefused()
+        return 'Error: ownership retained; local state cannot prove browser destruction.'
+    if existing._credential_factory_unconfirmed or existing._credential_binding is None:
+        raise browserlease.OwnershipRefused()
+    try:
+        with lease_authority.capture(binding=existing._credential_binding) as captured:
+            with captured.lock(binding=existing._credential_binding):
+                record = captured.verify(existing._credential_binding, name)
+                selection = existing._credential_transport_selection
+                if (type(selection) is not _TransportSelection
+                        or selection.kind not in (FAKE, PLAYWRIGHT, AUTOLAUNCH, REMOTE_CDP)
+                        or record.get('transport') != selection.kind):
+                    raise browserlease.OwnershipRefused()
+                kind = selection.kind
+                if kind == REMOTE_CDP:
+                    return browserlease.REASSIGN_NOTICE
+                with _lock:
+                    if (_session is not existing or _release_attempt is not None
+                            or _factory_attempt is not None):
+                        raise browserlease.OwnershipRefused()
+                    attempt = _ReleaseAttempt(name, existing._credential_binding, existing)
+                    _release_attempt = attempt
+                    existing._credential_factory_unconfirmed = True
+                    attempt.destruction_started = True
+                    if kind == PLAYWRIGHT:
+                        reason = _verify_playwright_destroyed(existing._t)
+                    elif kind == AUTOLAUNCH:
+                        existing.close()
+                        reason = _verify_autolaunch_destroyed()
+                    else:
+                        existing.close()
+                        reason = ''
                     if reason:
-                        return f"Error: ownership retained ({reason})."
-                _session = None
-            elif kind == AUTOLAUNCH:
-                if _session is not None:
-                    try:
-                        _session.close()
-                    except Exception:
-                        pass
-                    _session = None
-                reason = _verify_autolaunch_destroyed()
-                if reason:
-                    return f"Error: ownership retained ({reason})."
-            else:
-                # FAKE / NONE: no external process or profile exists. Drop the
-                # in-process session so no stale handle survives the release.
-                if _session is not None:
-                    try:
-                        _session.close()
-                    except Exception:
-                        pass
-                _session = None
-
-        browserlease.release(name, lease_id)
-        return ""
+                        return 'Error: ownership retained; browser destruction completion is unconfirmed.'
+                    attempt.destruction_confirmed = True
+                _settle_browser_release(attempt, captured)
+        return ''
+    except BaseException as error:
+        _attach_browser_outcome(error, release=attempt)
+        raise
 
 
 # --- provenance-scored skill registry ------------------------------------

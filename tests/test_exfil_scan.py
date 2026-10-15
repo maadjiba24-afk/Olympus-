@@ -64,12 +64,18 @@ def test_owner_resolution_failure_holds_outbound_content(monkeypatch):
 def test_active_vault_inventory_failure_holds_outbound_content(monkeypatch):
     from olympus import vault
 
-    def unavailable(_user):
+    inspected = []
+    legacy = []
+    def unavailable(user):
+        inspected.append(user)
         raise RuntimeError("vault backend exposed internal detail")
 
-    monkeypatch.setattr(vault, "names", unavailable)
+    monkeypatch.setattr(vault, "entries", unavailable)
+    monkeypatch.setattr(vault, "legacy_scan", lambda *args: legacy.append(args))
     reason = security.secret_exfil_reason(
         "an otherwise ordinary message", user="alice")
+    assert inspected == ["alice"]
+    assert legacy == []  # unavailable active authority must not fall through
     assert reason and "cannot be checked" in reason
     assert "internal detail" not in reason
 

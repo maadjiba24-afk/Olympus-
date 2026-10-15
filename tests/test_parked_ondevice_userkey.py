@@ -155,14 +155,14 @@ def test_multiple_pinned_keys_for_rotation(monkeypatch):
 def test_command_signer_nonzero_exit_raises():
     signer = mandate.command_signer([sys.executable, "-c",
                                      "import sys; sys.exit(3)"])
-    with pytest.raises(mandate.MandateError):
+    with pytest.raises(mandate.MandateError, match='^external co-signer exited 3:'):
         signer(b"payload")
 
 
 def test_command_signer_malformed_output_raises():
     signer = mandate.command_signer([sys.executable, "-c",
                                      "print('not json')"])
-    with pytest.raises(mandate.MandateError):
+    with pytest.raises(mandate.MandateError, match='^external co-signer returned malformed output:'):
         signer(b"payload")
 
 

@@ -362,21 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply", action="store_true",
         help="ACTUALLY perform it. Everything is a dry run without this.")
 
-    p_backup = sub.add_parser(
-        "backup", help="archive, encrypt, sign, and deliver a data backup of "
-                       "your memory/accounts/tokens off-droplet")
-    backup_action = p_backup.add_mutually_exclusive_group()
-    backup_action.add_argument(
-        "--list", action="store_true",
-        help="list local backup archives instead of making one")
-    backup_action.add_argument(
-        "--drill", nargs="?", const="", metavar="ARCHIVE",
-        help="strictly restore ARCHIVE (or the newest backup) into a throwaway "
-             "directory and record a recovery receipt")
-    p_backup.add_argument("--full", action="store_true",
-                          help="include the (large, reproducible) replay caches")
-    p_backup.add_argument("--no-deliver", action="store_true",
-                          help="make the archive but don't run OLYMPUS_BACKUP_CMD")
+    from . import backup_commands
+    backup_commands.add_backup_parser(sub)
     p_deploy = sub.add_parser(
         "deployment", help="evidence-backed persistent deployment readiness")
     p_deploy.add_argument(
@@ -389,16 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument(
         "--json", action="store_true", dest="as_json",
         help="print the status or receipt as JSON")
-    p_restore = sub.add_parser(
-        "restore", help="restore MEMORY_DIR from a backup archive "
-                        "(verifies signature + every file hash)")
-    p_restore.add_argument("archive", help="path to a backup archive")
-    p_restore.add_argument("--into", help="restore target dir (default: MEMORY_DIR)")
-    p_restore.add_argument("--force", action="store_true",
-                           help="overwrite a non-empty target")
-    p_restore.add_argument("--insecure", action="store_true",
-                           help="proceed despite a signature/hash failure "
-                                "(not recommended)")
+    backup_commands.add_recovery_parsers(sub)
 
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
@@ -875,16 +853,8 @@ def build_parser() -> argparse.ArgumentParser:
         "budget", help="show or set the daily spend cap on your API key (USD)")
     p_budget.add_argument("amount", nargs="?", type=float,
                           help="e.g. 5  (0 removes the cap)")
-    p_prefs_evidence = sub.add_parser(
-        "prefs-evidence",
-        help="inspect strict preference-policy evidence or explicitly preserve "
-             "and reset a corrupt blob")
-    p_prefs_evidence.add_argument(
-        "owner", nargs="?", default="cli",
-        help="exact owner id (use 'shared' for the installation budget)")
-    p_prefs_evidence.add_argument(
-        "--repair", action="store_true",
-        help="preserve corrupt bytes under their SHA-256, then reset to {}")
+    from . import prefs_commands
+    prefs_commands.add_parser(sub)
 
     # --- the Action spine (controlled-autonomy execution) ---
     sub.add_parser("actions", help="list pending actions awaiting approval")
@@ -960,6 +930,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_gw.add_argument("--status", action="store_true", dest="gw_status",
                       help="report a running daemon's per-channel health "
                            "(reads its status file), then exit")
+    from . import vault_commands
+    vault_commands.add_parser(sub)
     p_secret = sub.add_parser(
         "secret", help="named secrets for SecretRef config indirection — "
                        "reference them as vault:NAME instead of pasting "
@@ -1229,11 +1201,33 @@ def _main(argv: list[str] | None = None) -> int:
     except firstrun.ConfigFileError as err:
         print(f"[config] {err}", file=sys.stderr)
         return 1
-    try:                            # vault-stored settings too (env wins)
+    # Explicit local recovery must remain reachable when stored configuration
+    # cannot be decrypted. These commands perform no provider dispatch.
+    if args.command == "prefs-evidence":
+        from . import prefs_commands
+        return prefs_commands.command(args)
+    if args.command == "vault-evidence":
+        from . import vault_commands
+        return vault_commands.command(args)
+    # Observation-only local heat evidence must not hydrate stored secrets.
+    if args.command == "ctxheat" and args.action in ("status", "receipt"):
+        return _ctxheat_command(args)
+    from . import backup_commands
+    if backup_commands.is_local(args):
+        return backup_commands.command(args)
+    if args.command not in ("secret", "keygen"):
         from . import opconfig
-        opconfig.apply_secrets()
-    except Exception:
-        pass                        # a broken vault must never block the CLI
+        try:
+            opconfig.apply_secrets()
+        except opconfig.SecretHydrationError:
+            print("[vault] configuration hydration failed; this process may be partially updated. "
+                  "No command was started. Inspect custody and restart the command.", file=sys.stderr)
+            return 1
+        except Exception:
+            print("[vault] stored configuration secrets could not be inspected or validated. "
+                  "No command was started. Use `olympus vault-evidence` for explicit local recovery.",
+                  file=sys.stderr)
+            return 1
 
     # Sovereign boot invariant: a sovereign instance must not run on the PUBLIC
     # default signing seed (its decision logs and backups would be forgeable).
@@ -2081,71 +2075,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.command == "backup":
-        from . import backup, config
-        if args.list:
-            items = backup.list_backups()
-            if not items:
-                print("No local backups yet. Run `olympus backup` to make one.")
-            for b in items:
-                enc = "encrypted" if b["encrypted"] else "PLAINTEXT"
-                print(f"  {b['name']}  ({b['bytes'] // 1024} KB, {enc})")
-            return 0
-        if args.drill is not None:
-            try:
-                res = backup.drill(args.drill or None)
-            except backup.BackupError as err:
-                print(f"✗ restore drill refused: {err}")
-                return 1
-            except Exception as err:
-                print(f"✗ restore drill failed: {type(err).__name__}: {err}")
-                return 1
-            print(f"✓ restore drill recovered {res['restored']} files from "
-                  f"{res['archive_name']} into an isolated temporary directory.")
-            print(f"  archive SHA-256: {res['sha256']}")
-            return 0
-        res = backup.run(full=args.full, deliver_off=not args.no_deliver)
-        if not res.get("ok"):
-            print(f"✗ backup failed at {res.get('stage')}: {res.get('error')}")
-            return 1
-        print(f"✓ wrote {res['name']} — {res['files']} files, "
-              f"{res['bytes'] // 1024} KB, "
-              f"{'encrypted' if res.get('encrypted') else 'UNENCRYPTED'}, "
-              f"{'signed' if res.get('signed') else 'unsigned'}.")
-        if res.get("delivered"):
-            print(f"  delivered off-droplet via {res.get('via')}.")
-        elif res.get("reason"):
-            print(f"  not delivered: {res['reason']}")
-        if not config.backup_command():
-            print("  tip: set OLYMPUS_BACKUP_CMD (e.g. 'rclone copy {path} "
-                  "spaces:bucket/') to get the copy OFF this machine.")
-    elif args.command == "restore":
-        from . import backup
-        try:
-            res = backup.restore(args.archive, into=args.into,
-                                 force=args.force, insecure=args.insecure)
-        except backup.BackupError as err:
-            print(f"✗ restore refused: {err}")
-            return 1
-        except Exception as err:
-            # A wrong vault key (Fernet InvalidToken), a corrupt gzip/tar, or bad
-            # manifest JSON otherwise escapes as a raw traceback — surface it as
-            # the documented refusal instead.
-            print(f"✗ restore failed: {type(err).__name__}: {err}")
-            return 1
-        # Distinguish "no signature present" from "signature present but FAILED"
-        # (an --insecure restore of a tampered signed archive) — collapsing both
-        # to 'unsigned' hides a security-relevant fact.
-        if res.get("signature_ok"):
-            sig_state = "signature verified"
-        elif res.get("signed"):
-            sig_state = "signature INVALID — restored via --insecure"
-        else:
-            sig_state = "unsigned"
-        print(f"✓ restored {res['restored']} files into {res['into']} "
-              f"({sig_state}).")
-        if res["mismatched"]:
-            print(f"  ⚠ {len(res['mismatched'])} file(s) failed integrity: "
-                  f"{res['mismatched'][:5]}")
+        # Creation and delivery arrive here only after ordinary boot checks.
+        return backup_commands.command(args)
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
@@ -2973,16 +2904,12 @@ def _main(argv: list[str] | None = None) -> int:
         if act == "status":
             print(operator.status_summary(user))
         elif act == "enable":
-            s = operator._settings(user)
-            s["enabled"] = True
-            operator._save_settings(user, s)
+            operator.set_enabled(user, True)
             print("Operator enabled. Next: authorize a site with "
                   "`olympus operator authorize <domain>`, and grant the scope "
                   "with `olympus grant browser.operate`.")
         elif act == "disable":
-            s = operator._settings(user)
-            s["enabled"] = False
-            operator._save_settings(user, s)
+            operator.set_enabled(user, False)
             print("Operator disabled. Authorized sites are kept; re-enable "
                   "anytime with `olympus operator enable`.")
         elif act == "authorize":
@@ -3003,7 +2930,12 @@ def _main(argv: list[str] | None = None) -> int:
             if not args.target:
                 print("Usage: olympus operator forget <domain>")
                 return 1
-            ok = operator.forget_site(user, args.target)
+            from . import vault
+            try:
+                ok = operator.forget_site(user, args.target)
+            except vault.VaultError as err:
+                print(f"Could not complete site cleanup: {err}")
+                return 1
             print(f"Forgot {args.target.strip().lower()} (authorization + any "
                   "saved credentials removed)." if ok
                   else f"{args.target} was not authorized.")
@@ -3039,24 +2971,6 @@ def _main(argv: list[str] | None = None) -> int:
             except prefs.PreferencesStateError as err:
                 print(err)
                 return 1
-    elif args.command == "prefs-evidence":
-        from . import prefs
-        import json as _json
-        try:
-            result = (prefs.repair(args.owner) if args.repair
-                      else prefs.state_status(args.owner))
-        except prefs.PreferencesStateError as err:
-            print(_json.dumps({
-                "owner": err.user,
-                "state": "unavailable",
-                "quarantined": True,
-                "reason": err.reason,
-                "repair_command": err.repair_command,
-            }, indent=2))
-            return 1
-        print(_json.dumps(result, indent=2))
-        return (1 if result.get("state") == "unavailable"
-                or result.get("quarantined") else 0)
     elif args.command == "routing-stats":
         if getattr(args, "predictability", False):
             import json as _json

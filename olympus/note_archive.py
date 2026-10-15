@@ -1,17 +1,16 @@
 """Scoped file-memory archives; validation precedes journaled publication."""
 from __future__ import annotations
 
+from . import native_cleanup
 import io
 import gzip
 import json
 import os
 from pathlib import Path
-import stat
 import tarfile
-import tempfile
 import time
 
-from . import config, memory, note_evidence as notes
+from . import archive_io, config, memory, note_evidence as notes
 
 MAX_ARCHIVE = notes.MAX_BATCH + 8 * 1024 * 1024
 
@@ -42,49 +41,12 @@ def collect(roots):
 
 
 def external_read(path, cap):
-    path = notes.io(path)
-    info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode)
-            or getattr(info, "st_file_attributes", 0) & 0x400):
-        raise ValueError("archive is not a regular file")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                 | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-            raise ValueError("archive changed during read")
-        raw = stream.read(cap + 1)
-    if len(raw) > cap:
-        raise ValueError("archive size bound exceeded")
-    return raw
+    return archive_io.read_file(path, cap)
 
 
 def external_publish(path, raw):
     """Publish a caller-selected export/mirror without following a link."""
-    path = notes.logical(path)
-    for parent in path.parents:
-        if parent.exists():
-            info = notes.io(parent).lstat()
-            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                    or getattr(info, "st_file_attributes", 0) & 0x400):
-                raise ValueError("linked or non-directory export parent")
-    if notes.io(path).exists() or notes.io(path).is_symlink():
-        external_read(path, MAX_ARCHIVE)
-    notes.io(path.parent).mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, name = tempfile.mkstemp(prefix=".note-export-", dir=notes.io(path.parent))
-    staging = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staging, notes.io(path))
-        notes.sync_dir(path.parent)
-    finally:
-        try:
-            staging.unlink(missing_ok=True)
-        except OSError:
-            pass  # Preserve inaccessible staging without masking the failure.
+    archive_io.publish_file(path, raw)
 
 
 def _validate_scope(scope):
@@ -171,7 +133,30 @@ def _validate_file(rel, raw, scope):
 
 
 def export(out_path, *, user=None, all_users=False, encrypt=False):
+    # Freeze caller-selected root, destination and canonical owner before custody
+    # I/O. Configuration mutation is unsupported; detected drift refuses work.
+    state = notes.logical(config.MEMORY_DIR)
+    output = notes.logical(archive_io.selected_path(out_path))
+    exact = memory.canonical_owner(user)
+    # Admit before inventory or compression. Plain exports do not need custody.
+    with archive_io.operation('notes', require_key=encrypt, capture_key=encrypt) as session:
+        return _export(output, user=exact, all_users=all_users, encrypt=encrypt,
+                       session=session, state=state)
+
+
+def _check_root(state):
+    if notes.logical(config.MEMORY_DIR) != state:
+        raise ValueError('memory root changed during archive operation')
+
+
+def _export(output, *, user, all_users, encrypt, session, state):
+    _check_root(state)
+    if output.is_relative_to(state) and not (
+        output.parent == state and output.name.endswith((".tar.gz", ".tgz", ".enc"))
+    ):
+        raise ValueError("export destination overlaps managed memory state")
     with notes.guard():
+        _check_root(state)
         exact = memory.canonical_owner(user)
         if not all_users:
             # Scoped export refuses unclaimed legacy rather than certifying
@@ -181,10 +166,9 @@ def export(out_path, *, user=None, all_users=False, encrypt=False):
         scope = {"all": True} if all_users else {"user": exact}
         files, total = [], 0
         for path in collect(roots(exact, all_users)):
+            _check_root(state)
             rel = notes.relative(path)
-            raw = notes.read_raw(path)
-            if raw is None:
-                raise notes.NoteStateError("archive source disappeared")
+            raw = archive_io.read_file(path, notes.MAX_NOTE)
             _path_scope(rel, scope)
             _validate_file(rel, raw, scope)
             total += len(raw)
@@ -200,31 +184,49 @@ def export(out_path, *, user=None, all_users=False, encrypt=False):
             "files": [{"path": rel, "sha256": notes.digest(raw), "bytes": len(raw)}
                       for rel, raw in files],
         }
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            for rel, raw in [*(("data/" + rel, raw) for rel, raw in files),
-                             ("manifest.json", json.dumps(manifest, sort_keys=True).encode())]:
-                item = tarfile.TarInfo(rel)
-                item.size, item.mtime, item.mode = len(raw), 0, 0o600
-                archive.addfile(item, io.BytesIO(raw))
-        raw = buffer.getvalue()
+        # Limit compressor output before buffer growth, independently from
+        # the source aggregate, expanded tar and encryption envelope limits.
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        if len(manifest_bytes) > 4 * notes.MAX_NOTE:
+            raise ValueError('archive manifest bound exceeded')
+        raw = archive_io.encode_tar(
+            [*(("data/" + rel, raw) for rel, raw in files),
+             ("manifest.json", manifest_bytes)],
+            max_expanded=MAX_ARCHIVE, max_compressed=archive_io.MAX_PLAINTEXT)
         if encrypt:
-            from . import vault
-            raw = vault._fernet().encrypt(raw)
-        if len(raw) > MAX_ARCHIVE:
-            raise ValueError("encoded archive bound exceeded")
-        output = notes.logical(out_path)
-        state = notes.logical(config.MEMORY_DIR)
-        if output.is_relative_to(state) and not (
-            output.parent == state and output.name.endswith((".tar.gz", ".tgz", ".enc"))
-        ):
-            raise ValueError("export destination overlaps managed memory state")
+            raw = session.encrypt(raw)
+        _check_root(state)
         external_publish(output, raw)
-        return manifest
+        return {**manifest, 'archive_encryption': (
+            {'encrypted':True, 'format_version':1, 'context_authenticated':True,
+             'legacy_unbound':False} if encrypt else archive_io.encryption_metadata(plaintext=True))}
 
 
 def load_archive(path):
-    raw = memory._maybe_decrypt(external_read(path, MAX_ARCHIVE * 2))
+    state = notes.logical(config.MEMORY_DIR)
+    selected = notes.logical(archive_io.selected_path(path))
+    with archive_io.operation('notes', capture_key=False) as session:
+        return _load_archive(selected, session, state)
+
+
+def _load_archive(path, session, state):
+    _check_root(state)
+    raw = external_read(path, archive_io.MAX_CIPHERTEXT)
+    _check_root(state)
+    if raw[:2] == b'\x1f\x8b':
+        metadata = archive_io.encryption_metadata(plaintext=True)
+    else:
+        failed, cleanup_unconfirmed = False, False
+        try:
+            decoded = session.decrypt(raw)
+        except Exception as error:
+            failed, cleanup_unconfirmed = True, native_cleanup.unknown(error)
+        if failed:
+            error = ValueError('encrypted memory archive could not be decrypted with selected custody')
+            if cleanup_unconfirmed:
+                native_cleanup.mark(error)
+            raise error from None
+        raw, metadata = decoded.data, archive_io.encryption_metadata(decoded)
     if len(raw) > MAX_ARCHIVE:
         raise ValueError("decrypted archive bound exceeded")
     payloads, total, folded = {}, 0, set()
@@ -263,7 +265,9 @@ def load_archive(path):
     version = manifest.get("schema_version")
     if type(version) is not int or version not in memory.SUPPORTED_ARCHIVE_VERSIONS:
         raise ValueError(f"refusing to import unknown schema_version {version!r}")
+    _check_root(state)
     memory._gate_import(manifest, str(path))
+    _check_root(state)
     scope = manifest.get("scope")
     _validate_scope(scope)
     rows = manifest.get("files")
@@ -289,17 +293,28 @@ def load_archive(path):
         changes[rel] = data
     if set(payloads) != {"data/" + name for name in changes}:
         raise ValueError("archive payload and manifest inventories differ")
-    return manifest, changes
+    return {**manifest, 'archive_encryption':metadata}, changes
 
 
 def restore(path, *, overwrite=True, user=None, all_users=None):
-    manifest, changes = load_archive(path)
+    state = notes.logical(config.MEMORY_DIR)
+    selected = notes.logical(archive_io.selected_path(path))
+    exact = memory.canonical_owner(user) if user is not None else None
+    with archive_io.operation('notes', capture_key=False) as session:
+        return _restore(selected, overwrite=overwrite, user=exact, all_users=all_users,
+                        session=session, state=state)
+
+
+def _restore(path, *, overwrite, user, all_users, session, state):
+    manifest, changes = _load_archive(path, session, state)
     scope = manifest["scope"]
     if user is not None and scope != {"user": memory.canonical_owner(user)}:
         raise ValueError("archive does not match the explicitly selected owner")
     if all_users is not None and (scope == {"all": True}) != all_users:
         raise ValueError("archive scope requires an explicit matching --user or --all")
+    _check_root(state)
     with notes.guard():
+        _check_root(state)
         expected, skipped = {}, []
         for rel in list(changes):
             before = notes.read_raw(notes.checked_relative(rel))
@@ -308,7 +323,9 @@ def restore(path, *, overwrite=True, user=None, all_users=None):
                 del changes[rel]
             else:
                 expected[rel] = notes.digest(before)
+        _check_root(state)
         result = notes.transact(changes, expected)
+        _check_root(state)
         for rel, raw in changes.items():
             if notes.read_raw(notes.checked_relative(rel)) != raw:
                 raise notes.NoteStateError("restored bytes could not be verified")
@@ -318,6 +335,7 @@ def restore(path, *, overwrite=True, user=None, all_users=None):
                 "legacy_unclaimed": sorted(name for name in changes
                                            if name.startswith(("users/", "notes/"))),
                 "transaction": result.get("transaction"),
+                "archive_encryption": manifest['archive_encryption'],
                 "complete_principal_restore": False}
 
 

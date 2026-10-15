@@ -3,10 +3,11 @@ out-of-band secure credential capture, plain-English approval, browser
 auto-launch helpers, and the advanced-mode toggle. See docs/DESIGN_OPERATOR_UX.md.
 """
 
+from collections import OrderedDict
 import pytest
 
 from olympus import (actions, approvals, browser, config, interactive, memory,
-                     operator, securecapture, tools)
+                     operator, prefs, securecapture, store, tools, vault)
 from olympus.specialists import SPECIALISTS
 
 
@@ -14,6 +15,13 @@ from olympus.specialists import SPECIALISTS
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     memory.set_user("shared")
+    monkeypatch.setattr(store, "_backend", store.FileStore())
+    monkeypatch.delenv("OLYMPUS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY_FILE", raising=False)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "owned-interactive-compatibility-key")
+    monkeypatch.setenv("OLYMPUS_ENV", "test")
+    monkeypatch.setattr(securecapture, "_WORKFLOWS", OrderedDict())
+    monkeypatch.setattr(securecapture, "_ACTIVE", {})
     yield
     actions._REGISTRY.pop("_t_demo", None)    # don't pollute the capability count
 
@@ -37,23 +45,19 @@ class FakeIO:
 # --- secure credential capture (password never near the model) ------------
 
 def test_securecapture_request_pending_clear():
-    securecapture.request("shared", "Bank.com")
+    request_id = securecapture.request("shared", "Bank.com")
     assert securecapture.pending("shared") == "bank.com"
-    securecapture.clear("shared")
+    assert securecapture.clear("shared", request_id=request_id)
     assert securecapture.pending("shared") is None
 
 
+@pytest.mark.requires_crypto
 def test_after_turn_captures_credentials_out_of_band(monkeypatch):
-    from olympus import vault
-    stored = {}
-    monkeypatch.setattr(vault, "available", lambda: True)
-    monkeypatch.setattr(vault, "put",
-                        lambda u, n, v: stored.__setitem__((u, n), v))
     securecapture.request("shared", "bank.com")
     io = FakeIO(lines=["alice"], secrets=["s3cret"])
     events = interactive.after_turn("shared", io)
     assert "saved-login:bank.com" in events
-    assert stored[("shared", "site:bank.com")] == {"username": "alice",
+    assert vault.get("shared", "site:bank.com") == {"username": "alice",
                                                     "password": "s3cret"}
     assert securecapture.pending("shared") is None            # cleared
     assert operator.login_mode("shared", "bank.com") == "remember"
@@ -61,6 +65,7 @@ def test_after_turn_captures_credentials_out_of_band(monkeypatch):
     assert all("s3cret" not in o for o in io.outs)
 
 
+@pytest.mark.requires_crypto
 def test_after_turn_skips_capture_when_blank(monkeypatch):
     securecapture.request("shared", "bank.com")
     events = interactive.after_turn("shared", FakeIO(lines=[""], secrets=[""]))
@@ -212,7 +217,8 @@ def test_remember_login_tool_sets_pending_not_password():
     out = tools._operator_remember_login("Shop.com")
     assert "private prompt" in out and "vault" in out
     assert securecapture.pending("shared") == "shop.com"
-    assert operator.login_mode("shared", "shop.com") == "remember"
+    assert prefs.get("shared", "operator") is None
+    assert operator.authorized("shared", "shop.com") is False
 
 
 def test_set_advanced_mode_toggles():

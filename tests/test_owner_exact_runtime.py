@@ -29,6 +29,7 @@ where a convenience mock would have been.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from urllib.parse import quote
 
@@ -561,8 +562,16 @@ def test_quarantine_detection_lives_in_exactly_one_place():
 TOKEN = "LEGACY-PRIVATE-TOKEN-123456789"
 
 
+def _historical_ciphertext(payload):
+    # Deliberately reproduce the old unsalted format with this fixture's key;
+    # new production writes must not manufacture a legacy record for the test.
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(b"correct horse battery staple").digest())
+    return Fernet(key).encrypt(json.dumps(payload).encode())
+
+
 def _plant_legacy_vault(owner, payload):
-    blob = vault._fernet().encrypt(json.dumps(payload).encode())
+    blob = _historical_ciphertext(payload)
     store.backend().put(vault._NS, memory.safe_id(owner), blob)
     return memory.safe_id(owner)
 
@@ -615,7 +624,7 @@ def test_an_unreadable_quarantined_vault_fails_closed():
 
 @needs_crypto
 def test_a_structurally_invalid_quarantined_vault_fails_closed():
-    blob = vault._fernet().encrypt(json.dumps(["not", "a", "mapping"]).encode())
+    blob = _historical_ciphertext(["not", "a", "mapping"])
     store.backend().put(vault._NS, memory.safe_id(A), blob)
     assert security.secret_exfil_reason("anything", A)
 
@@ -643,7 +652,7 @@ def test_credential_paths_still_refuse_the_quarantined_vault():
 @needs_crypto
 def test_normal_exact_scanning_resumes_after_migration():
     key = _plant_legacy_vault(A, {"google": {"access_token": TOKEN}})
-    assert vault.migrate_legacy(key, A) == 1
+    assert vault.migrate_legacy(key, A, operation_id="1" * 32) == 1
 
     # A now owns it exactly: named in the reason, and B is free again.
     reason = security.secret_exfil_reason(TOKEN, A)
@@ -655,7 +664,7 @@ def test_normal_exact_scanning_resumes_after_migration():
 @needs_crypto
 def test_normal_exact_scanning_resumes_after_discard():
     key = _plant_legacy_vault(A, {"google": {"access_token": TOKEN}})
-    assert vault.discard_legacy(key) is True
+    assert vault.discard_legacy(key, operation_id="3" * 32) is True
     for who in (A, B):
         assert security.secret_exfil_reason(TOKEN, who) is None
 
@@ -663,8 +672,8 @@ def test_normal_exact_scanning_resumes_after_discard():
 @needs_crypto
 def test_installation_namespaces_are_not_scanned_as_legacy():
     vault.put("operator", "config:X", TOKEN)
-    assert vault._legacy_key_for("operator") is None
-    assert vault._legacy_key_for("shared") is None
+    assert vault.legacy_scan("operator", lambda value: True) is None
+    assert vault.legacy_scan("shared", lambda value: True) is None
     # The operator's own vault is live, so it is scanned the ordinary way.
     reason = security.secret_exfil_reason(TOKEN, "operator")
     assert reason and "vault:config:X" in reason

@@ -125,15 +125,30 @@ def test_mcp_auth_token_from_env(monkeypatch):
 
 
 def test_add_mcp_server_persists(monkeypatch, tmp_path):
+    import socket
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    connectors.add_mcp_server("linear", "https://mcp.linear.app/mcp",
+    resolved = []
+    def owned_resolver(host, port, family=0, type=0, proto=0, flags=0):
+        assert host in ("owned-mcp-first.test", "owned-mcp-replacement.test")
+        assert port == 443 and family in (0, socket.AF_INET)
+        assert type in (0, socket.SOCK_STREAM) and proto in (0, socket.IPPROTO_TCP)
+        assert flags == 0
+        resolved.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                 "", ("93.184.216.34", 443))]
+    monkeypatch.setattr(security.socket, "getaddrinfo", owned_resolver)
+    connectors.add_mcp_server("linear", "https://owned-mcp-first.test/mcp",
                               type="data", specialists=["chronos"])
     data = json.loads((tmp_path / "connectors.json").read_text())
     assert data["servers"][0]["name"] == "linear"
-    # adding same name replaces, not duplicates
-    connectors.add_mcp_server("linear", "https://new/mcp")
+    assert data["servers"][0]["url"] == "https://owned-mcp-first.test/mcp"
+    # Adding the same name replaces the persisted endpoint, not duplicates.
+    connectors.add_mcp_server("linear", "https://owned-mcp-replacement.test/mcp")
     data = json.loads((tmp_path / "connectors.json").read_text())
-    assert len([s for s in data["servers"] if s["name"] == "linear"]) == 1
+    selected = [s for s in data["servers"] if s["name"] == "linear"]
+    assert len(selected) == 1
+    assert selected[0]["url"] == "https://owned-mcp-replacement.test/mcp"
+    assert resolved == ["owned-mcp-first.test", "owned-mcp-replacement.test"]
 
 
 # --- security integration on specialists --------------------------------

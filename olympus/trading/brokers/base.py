@@ -12,8 +12,12 @@ vault entry, and resolves it through `olympus.vault` itself. Two consequences:
 
 * A forecasting or language-model component that somehow obtained a credentials
   object still has nothing usable — it holds a name, not a key.
-* Secrets never pass through the call sites that get logged, serialised into
-  audit records, or captured in tracebacks.
+* Handles can be logged or serialized without their resolved values. Public
+  credential errors do not echo those values or chain raw store errors.
+
+Resolved credentials necessarily exist in resolver/adapter memory. Debuggers or
+traceback tooling that explicitly captures local variables can inspect them;
+this interface does not provide isolation from such in-process inspection.
 
 `__repr__` and `__str__` are overridden to guarantee the handle cannot print
 secret material even if someone logs it, and that is tested rather than assumed.
@@ -69,24 +73,48 @@ class BrokerCredentials:
 
 
 def resolve_credentials(handle: BrokerCredentials) -> Mapping[str, Any]:
-    """Read the actual secret from the vault. Adapters call this; callers do not.
+    """Resolve one exact handle; unavailable and malformed state is not absence.
 
-    Raises `BrokerUnavailable` rather than returning None so a missing
-    credential fails loudly at connect time instead of producing a confusing
-    authentication error later.
+    Only this local vault read occurs here. Adapters still validate their own
+    required credential fields before any connection. Raw store errors and
+    credential values are never included in the public error or its chain.
     """
-    from olympus import vault
+    from olympus import vault, vault_records
+    invalid = False
+    try:
+        if type(handle) is not BrokerCredentials:
+            raise ValueError('invalid handle type')
+        vault_records.entry_name(handle.ref)
+        vault_records.owner_context(handle.user)
+    except Exception:
+        invalid = True
+    if invalid:
+        raise BrokerUnavailable('invalid credential handle')
+    unavailable = False
     try:
         value = vault.get(handle.user, handle.ref)
-    except Exception as exc:                             # noqa: BLE001
-        raise BrokerUnavailable(f"credential store unavailable: {exc}",
-                                ref=handle.ref) from exc
+    except Exception:
+        unavailable = True
+    if unavailable:
+        raise BrokerUnavailable('credential store unavailable', ref=handle.ref)
     if value is None:
-        raise BrokerUnavailable("no such credential", ref=handle.ref,
-                                user=handle.user)
-    if isinstance(value, str):
-        return {"value": value}
-    return dict(value)
+        raise BrokerUnavailable('no such credential', ref=handle.ref, user=handle.user)
+    invalid = False
+    try:
+        if type(value) is str and value:
+            selected = {'value': value}
+        elif type(value) is dict and value:
+            selected = value
+        else:
+            raise ValueError('invalid bundle type')
+        # Copy and validate exact JSON types, structural bounds and aggregate
+        # size. A foreign mapping or iterable cannot coerce itself into a bundle.
+        selected = vault_records.validate_entries({'broker': selected})['broker']
+    except Exception:
+        invalid = True
+    if invalid:
+        raise BrokerUnavailable('stored credential bundle is invalid', ref=handle.ref)
+    return selected
 
 
 @dataclass(frozen=True)
