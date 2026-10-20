@@ -902,3 +902,179 @@ def test_direct_parent_preserves_validation_and_does_not_reserve_a_leaf(owned, m
             directory, name = tx._parent(('ordinary',))
         assert directory is tx.directory and name == 'ordinary'
         assert checked == [True] and tx.observed_leaves == {}
+
+
+@pytest.fixture
+def held_lock_model(monkeypatch):
+    """A deterministic held-lock model; native sharing is checked separately."""
+    from types import SimpleNamespace
+    import stat
+    events = []
+    state = {"windows": True, "after_spelling": None, "information_calls": 0,
+             "fail_information_at": None, "failure": None, "replacement": False}
+    class Directory:
+        def __init__(self, label, inode):
+            self.label, self.inode = label, inode
+            self.win = object()
+        def check(self):
+            events.append(("directory", self.label))
+        def _case_spelling(self, name):
+            assert name == native._LOCK_NAME
+            events.append(("spelling", name))
+            if state["after_spelling"] is not None:
+                state["after_spelling"]()
+        def _open(self, name, flags):
+            assert name == native._LOCK_NAME and flags == os.O_RDWR
+            events.append(("reopen", name))
+            if state["windows"]:
+                pytest.fail("held Windows lock was unnecessarily reopened")
+            return 912349
+    root, locks = Directory("root", 41), Directory("locks", 42)
+    info = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_nlink=1,
+                           st_dev=5, st_ino=43, st_size=0, st_mtime_ns=0,
+                           st_ctime_ns=None, st_file_attributes=0)
+    tx = object.__new__(native.Transaction)
+    tx.pid, tx.thread = os.getpid(), threading.get_ident()
+    tx.closed, tx.held, tx.fd = False, True, 912348
+    tx.directory, tx.locks, tx.directories = root, locks, [root, locks]
+    tx.binding = SimpleNamespace(root_identity=(5, 41), locks_identity=(5, 42),
+                                 lock_identity=(5, 43))
+    monkeypatch.setattr(native, "_POISONED", False)
+    monkeypatch.setattr(native, "_LOCAL", threading.local())
+    native._LOCAL.current = tx
+    def identity(directory):
+        directory.check()
+        return 5, directory.inode
+    def information(fd):
+        assert fd in (912348, 912349)
+        state["information_calls"] += 1
+        events.append(("information", fd))
+        if state["information_calls"] == state["fail_information_at"]:
+            raise state["failure"]
+        if fd == 912349 and state["replacement"]:
+            return SimpleNamespace(**{**vars(info), "st_ino": 99})
+        return info
+    original_close = os.close
+    def close(fd):
+        if fd == 912349:
+            events.append(("close", fd))
+            return
+        return original_close(fd)
+    monkeypatch.setattr(native.storage, "_directory_identity", identity)
+    monkeypatch.setattr(native.storage, "_file_information", information)
+    monkeypatch.setattr(native.os, "close", close)
+    return SimpleNamespace(tx=tx, state=state, info=info, events=events)
+
+
+def test_windows_held_lock_keeps_fresh_identity_and_spelling_on_each_check(held_lock_model):
+    case = held_lock_model
+    case.tx.check()
+    case.tx.check()
+    assert case.state["information_calls"] == 4
+    assert sum(event[0] == "spelling" for event in case.events) == 2
+    assert not any(event[0] in ("reopen", "close") for event in case.events)
+    # A later call observes a changed held identity; no successful check is cached.
+    case.info.st_ino = 99
+    with pytest.raises(native.PreferenceStorageError, match="identity changed"):
+        case.tx.check()
+    assert case.state["information_calls"] == 5
+
+
+@pytest.mark.parametrize("attribute,value", [
+    ("st_ino", 99), ("st_nlink", 2), ("st_file_attributes", 0x400),
+])
+def test_windows_held_lock_rechecks_file_after_spelling_scan(held_lock_model, attribute, value):
+    case = held_lock_model
+    case.state["after_spelling"] = lambda: setattr(case.info, attribute, value)
+    with pytest.raises((native.PreferenceStorageError, native.storage.StorageError)):
+        case.tx.check()
+    assert case.state["information_calls"] == 2
+    assert not any(event[0] == "reopen" for event in case.events)
+
+
+@pytest.mark.parametrize("kind", [OSError, KeyboardInterrupt, SystemExit])
+def test_windows_held_lock_preserves_spelling_failure_and_cleanup_poison(held_lock_model, kind):
+    from olympus import native_cleanup
+    case = held_lock_model
+    primary = kind("owned spelling scan failure")
+    native_cleanup.mark(primary)
+    def fail():
+        raise primary
+    case.state["after_spelling"] = fail
+    with pytest.raises(kind) as caught:
+        case.tx.check()
+    assert caught.value is primary
+    assert native._POISONED and native.cleanup_unknown(primary)
+    assert case.state["information_calls"] == 1
+    assert not any(event[0] in ("reopen", "close") for event in case.events)
+
+
+@pytest.mark.parametrize("kind", [OSError, KeyboardInterrupt, SystemExit])
+def test_windows_held_lock_preserves_final_identity_query_failure(held_lock_model, kind):
+    case = held_lock_model
+    primary = kind("owned final identity failure")
+    case.state.update(fail_information_at=2, failure=primary)
+    with pytest.raises(kind) as caught:
+        case.tx.check()
+    assert caught.value is primary
+    assert case.state["information_calls"] == 2
+    assert not any(event[0] in ("reopen", "close") for event in case.events)
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_posix_lock_still_reopens_name_and_closes_observation(held_lock_model, replacement):
+    case = held_lock_model
+    case.state.update(windows=False, replacement=replacement)
+    case.tx.directory.win = case.tx.locks.win = None
+    if replacement:
+        with pytest.raises(native.PreferenceStorageError, match="pathname changed"):
+            case.tx.check()
+    else:
+        case.tx.check()
+    assert case.state["information_calls"] == 2
+    assert ("reopen", native._LOCK_NAME) in case.events
+    assert case.events[-1] == ("close", 912349)
+    assert not any(event[0] == "spelling" for event in case.events)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="owned Windows lock share-delete contract")
+@pytest.mark.parametrize("operation", ["rename", "case-rename", "unlink"])
+def test_actual_windows_held_lock_rejects_delete_and_rename(owned, operation):
+    path = owned / "locks" / native._LOCK_NAME
+    with native.transaction(owned) as tx:
+        before = tx.binding.lock_identity
+        with pytest.raises(OSError) as caught:
+            if operation == "unlink":
+                path.unlink()
+            else:
+                destination = path.with_name("retained-lock" if operation == "rename"
+                                             else native._LOCK_NAME.upper())
+                path.rename(destination)
+        assert caught.value.winerror == 32  # Sharing violation, not an ACL refusal.
+        tx.check()
+        assert tx.binding.lock_identity == before
+        assert native.storage._file_identity(native.storage._file_information(tx.fd))[:2] == before
+        assert sorted(p.name for p in path.parent.iterdir()) == [native._LOCK_NAME]
+    assert path.read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="owned Windows bidirectional sharing contract")
+def test_actual_windows_lock_refuses_preexisting_delete_access(owned):
+    from olympus import prefs_windows
+    with native.transaction(owned):
+        pass
+    directory = native.storage._Directory(owned / "locks")
+    handle = None
+    try:
+        handle = prefs_windows.open_relative(directory.win.handle, native._LOCK_NAME, delete=True)
+        with pytest.raises(OSError) as caught:
+            with native.transaction(owned):
+                pytest.fail("non-share-delete lock admitted a preceding DELETE owner")
+        assert caught.value.winerror == 32
+        assert not native._IN_FLIGHT and not native._POISONED
+    finally:
+        if handle is not None:
+            prefs_windows.close(handle)
+        directory.close()
+    with native.transaction(owned) as tx:
+        tx.check()

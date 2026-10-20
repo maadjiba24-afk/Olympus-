@@ -37,9 +37,17 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+# Phase reports run before monkeypatch fixtures restore JSONEncoder methods.
+# Keep both bound methods on this private encoder; encode calls iterencode
+# dynamically. Product fault injection remains active on the public class.
+_REPORT_ENCODER = json.JSONEncoder(ensure_ascii=True, sort_keys=True,
+                                   separators=(",", ":"), allow_nan=False)
+_REPORT_ENCODER.iterencode = _REPORT_ENCODER.iterencode
+_REPORT_ENCODE = _REPORT_ENCODER.encode
+
+
 def encoded(value):
-    return json.dumps(value, ensure_ascii=True, sort_keys=True,
-                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return _REPORT_ENCODE(value).encode("utf-8")
 
 
 def integer(value, low, high, reason):

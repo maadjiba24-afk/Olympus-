@@ -164,8 +164,19 @@ class Transaction:
                 or storage._directory_identity(self.locks) != self.binding.locks_identity
                 or storage._file_identity(storage._file_information(self.fd))[:2] != self.binding.lock_identity):
             raise PreferenceStorageError('preference authority identity changed')
-        # Reopen only the persistent lock name under its held parent. This
-        # detects pathname replacement on POSIX and exact spelling on Windows.
+        if self.directory.win is not None:
+            # The original descriptor is still open without FILE_SHARE_DELETE.
+            # Windows sharing rules prevent delete/rename while it is held,
+            # including a DELETE owner that predates our acquisition. This
+            # does not prevent attribute or content mutation: retain fresh
+            # file identity checks on both sides of an exact-spelling scan.
+            # The scan also refuses an added case-folding sibling alias.
+            _delegated(self.locks._case_spelling, _LOCK_NAME)
+            if storage._file_identity(storage._file_information(self.fd))[:2] != self.binding.lock_identity:
+                raise PreferenceStorageError('preference lock identity changed')
+            return
+        # POSIX permits replacement of a held name. Reopen it under the held
+        # parent and compare identity on every check; never cache that result.
         observed = _delegated(self.locks._open, _LOCK_NAME, os.O_RDWR)
         primary = None
         try:

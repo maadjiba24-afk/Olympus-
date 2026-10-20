@@ -671,3 +671,34 @@ def test_collection_failure_retains_long_node_refusal_and_never_partitions(tmp_p
     assert reporter.collection_error is caught.value and reporter.selected is None
     assert reporter.phases == 0 and rows == []
     assert [item.nodeid for item in session.items] == [node]
+
+
+
+@pytest.mark.parametrize("target", ["dumps", "encode", "iterencode"])
+def test_reporter_serializes_while_json_fault_patch_is_active(tmp_path, monkeypatch, target):
+    node = "tests/test_owned.py::test_json_fault"
+    rows = []
+    reporter = suite.make_plugin(pytest, tmp_path, 0,
+                                 lambda row: rows.append(suite.encoded(row)))
+    reporter.selected = [node]
+    owner = json if target == "dumps" else json.JSONEncoder
+    def forbidden(*args, **kwargs):
+        raise RuntimeError("owned JSON fault remains active")
+    monkeypatch.setattr(owner, target, forbidden)
+    with pytest.raises(RuntimeError, match="owned JSON fault remains active"):
+        json.dumps({"ordinary": True})
+    reporter.pytest_runtest_logreport(SimpleNamespace(
+        nodeid=node, when="call", outcome="passed", duration=0.000001, longrepr=None))
+    assert reporter.phases == 1
+    assert rows == [
+        b'{"duration_ns":1000,"kind":"phase","nodeid":"tests/test_owned.py::test_json_fault",'
+        b'"outcome":"passed","reason_sha256":null,"when":"call","xfail":"none"}'
+    ]
+    assert suite.encoded({"z": "\u20ac", "a": [True, None, 1.5]}) == (
+        b'{"a":[true,null,1.5],"z":"\\u20ac"}')
+    with pytest.raises(ValueError):
+        suite.encoded({"nonfinite": float("nan")})
+    # The reporter must not restore globals and thereby neutralize the product fault.
+    assert getattr(owner, target) is forbidden
+    with pytest.raises(RuntimeError, match="owned JSON fault remains active"):
+        json.dumps({"ordinary": True})
