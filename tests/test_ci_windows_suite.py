@@ -566,3 +566,108 @@ def test_aggregate_accepts_distinct_same_version_metadata_but_refuses_noncanonic
     bundles[0][0]["runtime"]["packages"].append(dict(bundles[0][0]["runtime"]["packages"][0]))
     with pytest.raises(ValueError, match="dependency identity"):
         _aggregate(bundles)
+
+
+def _owned_character_node(size, fill="x", file="bound"):
+    prefix, suffix = "tests/test_" + file + ".py::test_owned[", "]"
+    assert len(fill) == 1
+    node = prefix + fill * (size - len(prefix + suffix)) + suffix
+    assert len(node) == size
+    return node
+
+
+@pytest.mark.parametrize("size,fill", [(4096, "x"), (4096, "\u20ac"),
+                                      (4097, "x"), (4097, "\u20ac")],
+                         ids=["ascii-at-limit", "unicode-at-character-limit",
+                              "ascii-over-limit", "unicode-over-character-limit"])
+def test_collection_keeps_existing_character_limit(size, fill):
+    node = _owned_character_node(size, fill)
+    if size == 4096:
+        assert suite.nodes_checked([node]) == [node]
+    else:
+        with pytest.raises(ValueError, match="invalid collected node"):
+            suite.nodes_checked([node])
+
+
+def test_maximum_admitted_ids_keep_exact_partition_phase_and_junit_join():
+    nodes = [_owned_character_node(4096, fill, file)
+             for file, fill in [("a", "x"), ("b", "\u20ac"), ("c", "y"), ("d", "z")]]
+    assert suite.assignments(nodes) == [[node] for node in nodes]
+    for shard, node in enumerate(nodes):
+        phases = [_phase(node, when) for when in ("setup", "call", "teardown")]
+        assert suite.verify_junit(_xml([node]), [node], phases, []) == []
+        rows = [dict(kind="configuration", standard_selection=True, timeout=300),
+                dict(kind="collection", universe=nodes, selected=[node], shard=shard),
+                *phases, dict(kind="session_end", exitstatus=0, phases=3, warnings=0)]
+        observed = suite.read_stream(b"".join(suite.encoded(row) + b"\n" for row in rows))
+        assert observed[0]["selected"] == [node] and observed[1] == phases
+        with pytest.raises(ValueError, match="node mismatch"):
+            suite.verify_junit(_xml([node[:-2] + "q]"]), [node], phases, [])
+        with pytest.raises(ValueError, match="phase"):
+            suite.verify_junit(_xml([node]), [node], phases[:-1], [])
+
+
+@pytest.mark.parametrize("failure_type", [ValueError, OSError, KeyboardInterrupt, SystemExit])
+def test_run_preserves_actual_collection_hook_failure_without_completed_receipt(tmp_path, monkeypatch, failure_type):
+    root, output = tmp_path / "checkout", tmp_path / "evidence"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(suite, "__file__", str(root / "scripts" / "ci_windows_suite.py"))
+    monkeypatch.setattr(suite, "os", SimpleNamespace(name="nt", environ={"GITHUB_ACTIONS": "true"}))
+    monkeypatch.setattr(suite, "sys", SimpleNamespace(version_info=(3, 12)))
+    observed = []
+    source = {"head": SHA, "tree": TREE, "files": {}}
+    monkeypatch.setattr(suite, "source_binding", lambda selected: observed.append(("source", selected)) or source)
+    monkeypatch.setattr(suite, "runtime_binding", lambda selected: observed.append(("runtime", selected)) or {"owned": True})
+    primary = failure_type("owned collection primary")
+    def fail_assignment(nodes):
+        assert nodes == NODES
+        raise primary
+    monkeypatch.setattr(suite, "assignments", fail_assignment)
+    def forbidden(*args, **kwargs):
+        pytest.fail("incomplete collection reached completed-bundle validation")
+    monkeypatch.setattr(suite, "module_bindings", forbidden)
+    original_read_stream = suite.read_stream
+    monkeypatch.setattr(suite, "read_stream", forbidden)
+    def fake_main(args, *, plugins):
+        assert args == ["-q", "--junitxml=" + str(output / "junit.xml")]
+        assert len(plugins) == 1
+        reporter = plugins[0]
+        config = SimpleNamespace(rootpath=root, args=[str(root)],
+            option=SimpleNamespace(maxfail=None), _env_timeout=300.0, _env_timeout_func_only=False,
+            pluginmanager=SimpleNamespace(hasplugin=lambda name: name == "timeout"))
+        reporter.pytest_configure(config)
+        session = SimpleNamespace(items=[SimpleNamespace(nodeid=node) for node in NODES], config=config)
+        hook = reporter.pytest_collection_finish(session)
+        next(hook)
+        with pytest.raises(failure_type) as caught:
+            next(hook)
+        assert caught.value is reporter.collection_error is primary
+        assert reporter.selected is None and reporter.phases == 0
+        reporter.pytest_sessionfinish(session, 3)
+        return 3
+    monkeypatch.setattr(pytest, "main", fake_main)
+    with pytest.raises(failure_type) as caught:
+        suite.run(0, output, SHA, "123", "1")
+    assert caught.value is primary
+    assert observed == [("source", root), ("runtime", root), ("source", root), ("runtime", root)]
+    assert json.loads((output / "started.json").read_bytes())["status"] == "started"
+    assert not (output / "result.json").exists()
+    raw = (output / "events.jsonl").read_bytes()
+    assert [row["kind"] for row in map(json.loads, raw.splitlines())] == ["configuration", "session_end"]
+    with pytest.raises(ValueError, match="duplicate/missing session boundary"):
+        original_read_stream(raw)
+
+
+def test_collection_failure_retains_long_node_refusal_and_never_partitions(tmp_path):
+    rows = []
+    reporter = suite.make_plugin(pytest, tmp_path, 0, rows.append)
+    node = _owned_character_node(4097)
+    session = SimpleNamespace(items=[SimpleNamespace(nodeid=node)], config=None)
+    hook = reporter.pytest_collection_finish(session)
+    next(hook)
+    with pytest.raises(ValueError, match="invalid collected node") as caught:
+        next(hook)
+    assert reporter.collection_error is caught.value and reporter.selected is None
+    assert reporter.phases == 0 and rows == []
+    assert [item.nodeid for item in session.items] == [node]

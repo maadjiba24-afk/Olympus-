@@ -794,7 +794,7 @@ def test_an_experiment_cannot_outlast_its_wall_clock():
 # why RLIMIT_NPROC is not counted
 # ---------------------------------------------------------------------------
 
-def test_rlimit_nproc_is_measured_and_found_insufficient():
+def test_rlimit_nproc_is_measured_and_found_insufficient(request, tmp_path):
     """The instruction was not to *assume* `RLIMIT_NPROC` is inadequate.
 
     So this measures it. `RLIMIT_NPROC` counts processes **per real UID across
@@ -815,44 +815,9 @@ def test_rlimit_nproc_is_measured_and_found_insufficient():
         pytest.skip("RLIMIT_NPROC is a Unix concept")
     import resource
 
-    uid = os.getuid()
-    same_uid = 0
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if entry.stat().st_uid == uid:
-                same_uid += 1
-        except OSError:
-            continue
-
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:                                          # pragma: no cover
-        os.close(read_fd)
-        answer = b"?"
-        try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (2, 2))
-            child = os.fork()
-            if child == 0:
-                os._exit(0)
-            os.waitpid(child, 0)
-            answer = b"forked"
-        except OSError:
-            answer = b"blocked"
-        except BaseException:                             # noqa: BLE001
-            answer = b"?"
-        try:
-            os.write(write_fd, answer)
-        except OSError:
-            pass
-        os._exit(0)
-
-    os.close(write_fd)
-    outcome = os.read(read_fd, 16).decode() or "?"
-    os.close(read_fd)
-    os.waitpid(pid, 0)
-
+    from owned_fork_driver import run_owned_case
+    facts = run_owned_case('rlimit', tmp_path, request)['measurement']
+    uid, same_uid, outcome = facts['uid'], facts['same_uid'], facts['outcome']
     assert same_uid > 2, (
         "this host runs fewer than three processes for the test uid, so the "
         "measurement below cannot distinguish the two failure modes")

@@ -281,7 +281,13 @@ def _inherited_worker(backend, root, tx, sender):
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='requires an actual POSIX fork of active authority')
-def test_forked_active_authority_refuses_read_close_and_nested_reuse(tmp_path):
+def test_forked_active_authority_refuses_read_close_and_nested_reuse(tmp_path, request):
+    if __import__('sys').platform.startswith('linux'):
+        from owned_fork_driver import run_owned_case
+        run_owned_case('vault', tmp_path, request)
+        with vs.transaction(store.FileStore(), tmp_path) as fresh:
+            assert fresh.get('vault', 'key') == b'preserved'
+        return
     ctx = multiprocessing.get_context('fork')
     receiver, sender = ctx.Pipe(duplex=False)
     backend = store.FileStore()

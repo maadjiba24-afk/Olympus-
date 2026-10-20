@@ -431,6 +431,7 @@ def module_bindings(root, source):
 def make_plugin(pytest, root, shard, append):
     class Reporter:
         selected = None
+        collection_error = None
         phases = 0
         warnings = 0
         partitioning = False
@@ -467,18 +468,24 @@ def make_plugin(pytest, root, shard, append):
 
         @pytest.hookimpl(wrapper=True, tryfirst=True)
         def pytest_collection_finish(self, session):
-            yield
-            universe = [item.nodeid for item in session.items]
-            self.selected = assignments(universe)[shard]
-            wanted = set(self.selected)
-            append({"kind": "collection", "universe": universe, "selected": self.selected, "shard": shard})
-            removed = [item for item in session.items if item.nodeid not in wanted]
-            session.items[:] = [item for item in session.items if item.nodeid in wanted]
-            self.partitioning = True
             try:
-                session.config.hook.pytest_deselected(items=removed)
-            finally:
-                self.partitioning = False
+                yield
+                universe = [item.nodeid for item in session.items]
+                self.selected = assignments(universe)[shard]
+                wanted = set(self.selected)
+                append({"kind": "collection", "universe": universe, "selected": self.selected, "shard": shard})
+                removed = [item for item in session.items if item.nodeid not in wanted]
+                session.items[:] = [item for item in session.items if item.nodeid in wanted]
+                self.partitioning = True
+                try:
+                    session.config.hook.pytest_deselected(items=removed)
+                finally:
+                    self.partitioning = False
+            except BaseException as error:
+                if self.collection_error is None:
+                    self.collection_error = error
+                raise
+
 
         @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session):
@@ -548,6 +555,10 @@ def run(shard, output, expected_sha, run_id, attempt):
         append({"kind": "session_end", "exitstatus": code, "phases": plugin.phases, "warnings": plugin.warnings})
     after = source_binding(root)
     require(before == after and runtime == runtime_binding(root), "source/runtime changed during shard")
+    # A hook refusal has no collection row. Keep its actual primary; do
+    # not replace it with a secondary completed-stream boundary error.
+    if plugin.collection_error is not None:
+        raise plugin.collection_error
     modules = module_bindings(root, before)
     stream_raw, xml_raw = ordinary_bytes(output / "events.jsonl"), ordinary_bytes(output / "junit.xml")
     collection, phases, skips, warnings, end = read_stream(stream_raw)

@@ -265,7 +265,14 @@ def test_thread_transactions_do_not_lose_updates():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows shared-state multi-process topology unsupported")
-def test_posix_process_transactions_do_not_lose_updates():
+def test_posix_process_transactions_do_not_lose_updates(request):
+    if __import__('sys').platform.startswith('linux'):
+        from owned_fork_driver import run_owned_case
+        run_owned_case('owner', config.MEMORY_DIR, request)
+        assert len(todos.listing(OWNER)) == len(outcomes.events(OWNER)) == 8
+        assert len(routing_outcomes.events(OWNER)) == 8
+        assert discovery.open_gaps(user=OWNER)[0]['hits'] == 8
+        return
     ctx = multiprocessing.get_context("fork")
     processes = [ctx.Process(target=_transaction_worker, args=(str(config.MEMORY_DIR), i)) for i in range(8)]
     for process in processes:

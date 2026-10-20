@@ -599,7 +599,7 @@ def test_an_over_long_token_is_rejected_without_echoing_it(monkeypatch):
 
 @pytest.mark.parametrize("token", [
     "abcDEF123", "a-b_c.d~e", "tok+en/slash", "padded==", "A" * 8192,
-])
+], ids=[None, None, None, None, 'token-8192-chars'])
 def test_well_formed_bearer_tokens_are_accepted(token):
     assert rp._validated_bearer_token(token) == token
 

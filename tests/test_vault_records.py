@@ -64,7 +64,7 @@ def test_depth_node_and_entry_bounds():
         vr.validate_entries({str(i): 'x' for i in range(vr.MAX_ENTRIES + 1)})
 
 
-@pytest.mark.parametrize('owner', ['', None, 1, 'x' * 4097])
+@pytest.mark.parametrize('owner', ['', None, 1, 'x' * 4097], ids=[None, None, None, 'owner-4097-chars'])
 def test_invalid_owner_refuses(owner):
     with pytest.raises(vr.RecordError):
         vr.owner_context(owner)

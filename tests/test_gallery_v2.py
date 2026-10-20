@@ -43,7 +43,7 @@ def replace_manifest(store, value):
     (store.root / 'state.json').write_text(json.dumps(value))
 
 
-@pytest.mark.parametrize('owner', [None, '', ' ', 42, {}, 'a' * 8193, '\ud800'])
+@pytest.mark.parametrize('owner', [None, '', ' ', 42, {}, 'a' * 8193, '\ud800'], ids=[None, None, None, None, None, 'owner-8193-chars', None])
 def test_explicit_invalid_owner_never_falls_back(workspace, owner):
     with pytest.raises(state.GalleryError) as caught:
         gallery.list_images(owner)

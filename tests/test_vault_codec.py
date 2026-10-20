@@ -184,7 +184,7 @@ def test_missing_backend_has_same_typed_refusal(encrypted, monkeypatch, operatio
                        max_plaintext=100, allow_legacy=True)
 
 
-@pytest.mark.parametrize("password", [b"", b"x" * 4097, "not-bytes", None, 7])
+@pytest.mark.parametrize("password", [b"", b"x" * 4097, "not-bytes", None, 7], ids=[None, 'passphrase-4097-bytes', None, None, None])
 def test_passphrase_bounds_apply_before_backend(encrypted, monkeypatch, password):
     monkeypatch.setattr(vc, "_backend", lambda: pytest.fail("invalid password reached backend"))
     for operation in (lambda: vc.encrypt(b"x", password, context=CONTEXT, max_plaintext=100),

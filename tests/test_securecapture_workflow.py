@@ -539,7 +539,17 @@ def test_registry_evicts_only_clean_completed_entry(owned, monkeypatch):
 
 
 @pytest.mark.skipif(not hasattr(os, 'fork'), reason='actual POSIX fork control; separate Windows child claimant control')
-def test_actual_fork_refuses_inherited_workflow_before_registry_lock_or_io(owned, monkeypatch):
+def test_actual_fork_refuses_inherited_workflow_before_registry_lock_or_io(owned, monkeypatch, request):
+    if __import__('sys').platform.startswith('linux'):
+        from owned_fork_driver import run_owned_case
+        before_active = dict(capture._ACTIVE)
+        before_workflows = list(capture._WORKFLOWS.items())
+        run_owned_case('capture', owned, request)
+        assert capture._ACTIVE == before_active
+        assert list(capture._WORKFLOWS.items()) == before_workflows
+        assert prefs.get(OWNER, 'pending_secure_login') is None
+        assert prefs.get(OWNER, 'operator') is None
+        return
     import signal
     completed = capture.begin(OWNER)
     class PoisonLock:
