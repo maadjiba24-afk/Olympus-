@@ -75,7 +75,7 @@ def _declared_optional_packages() -> set[str]:
     out: set[str] = set()
     for group in extras.values():
         for spec in group:
-            name = re.split(r"[<>=!~ \[]", spec, 1)[0].strip().lower()
+            name = re.split(r"[<>=!~ \[]", spec, maxsplit=1)[0].strip().lower()
             if name:
                 out.add(name)
     return out
@@ -131,7 +131,7 @@ def _required_packages() -> set[str]:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text())
     out: set[str] = set()
     for spec in data["project"]["dependencies"]:
-        name = re.split(r"[<>=!~ \[]", spec, 1)[0].strip().lower()
+        name = re.split(r"[<>=!~ \[]", spec, maxsplit=1)[0].strip().lower()
         if name:
             out.add(name)
     return out

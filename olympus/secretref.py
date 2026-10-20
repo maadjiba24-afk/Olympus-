@@ -14,9 +14,9 @@ so `OLYMPUS_MODELS='[{"model": "gpt-5", "api_key": "vault:openai-main"}]'`
 never carries the key itself, and a config file/env dump can be shared
 without leaking anything. Plain values keep working unchanged.
 
-Resolution fails CLOSED: a reference that can't be resolved yields an empty
-string (an unusable credential), never a partial secret or a crash on the
-request path.
+An absent reference yields an unusable credential. An inaccessible or invalid
+vault raises VaultError so callers cannot mistake a storage outage for absence.
+Other reference kinds retain their existing best-effort behavior.
 """
 
 from __future__ import annotations
@@ -42,16 +42,20 @@ def resolve(value, default: str = "") -> str:
     ref = value.strip()
     kind, _, rest = ref.partition(":")
     rest = rest.strip()
+    if kind == "vault":
+        from . import vault
+        resolved = vault.get(_VAULT_USER, f"secretref:{rest}")
+        if resolved is None:
+            return default
+        if type(resolved) is not str:
+            raise vault.VaultError("stored secret reference is not a string")
+        return resolved or default
     try:
         if kind == "env":
             return (os.environ.get(rest) or default).strip() or default
         if kind == "file":
             with open(os.path.expanduser(rest), encoding="utf-8") as fh:
                 return fh.readline().strip() or default
-        if kind == "vault":
-            from . import vault
-            return (vault.get(_VAULT_USER, f"secretref:{rest}")
-                    or default)
         if kind == "keychain":
             return _keychain(rest) or default
     except Exception:

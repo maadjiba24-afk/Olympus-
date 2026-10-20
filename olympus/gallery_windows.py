@@ -64,7 +64,25 @@ class VolumeSize(C.Structure):
                 ('sectors', U32), ('sector_bytes', U32)]
 
 
+# Cache only fully configured function bindings, never handles or observations.
+# A miss builds privately: concurrent first callers may each finish a complete
+# pair, and publication of one immutable tuple never exposes partial signatures.
+# No lock is inherited across a fork; a different PID must bind its own pair.
+_API_BINDINGS = None
+
+
 def _apis():
+    global _API_BINDINGS
+    pid = os.getpid()
+    captured = _API_BINDINGS
+    if captured is not None and captured[0] == pid:
+        return captured[1]
+    bindings = _bind_apis()
+    _API_BINDINGS = (pid, bindings)
+    return bindings
+
+
+def _bind_apis():
     kernel = C.WinDLL('kernel32', use_last_error=True)
     nt = C.WinDLL('ntdll')
     signatures = {
@@ -106,7 +124,7 @@ def _component(name):
         raise OSError('unsafe native relative component')
 
 
-def information(handle, directory=None):
+def _information_record(handle, directory=None):
     kernel, _ = _apis()
     info = HandleInfo()
     if not kernel.GetFileInformationByHandle(handle, C.byref(info)):
@@ -116,12 +134,21 @@ def information(handle, directory=None):
             or directory is not None and is_directory != directory
             or not is_directory and info.links != 1):
         raise OSError('unsafe native gallery handle identity')
+    return info, is_directory
+
+
+def information(handle, directory=None):
+    info, is_directory = _information_record(handle, directory)
     ticks = (info.write.high << 32) | info.write.low
     return SimpleNamespace(st_mode=(stat.S_IFDIR if is_directory else stat.S_IFREG) | 0o600,
                            st_file_attributes=info.attributes, st_nlink=info.links,
                            st_dev=info.volume, st_ino=(info.index_high << 32) | info.index_low,
                            st_size=(info.size_high << 32) | info.size_low,
                            st_mtime_ns=(ticks - 116444736000000000) * 100)
+
+
+# Preserve the public replacement seam; this is a callable identity, never authority.
+_PUBLIC_INFORMATION_IMPLEMENTATION = information
 
 
 def open_relative(parent, name, *, directory=False, create=False, exclusive=False,
@@ -272,7 +299,12 @@ class NativeDirectory:
 
     def check(self):
         for handle in self.handles:
-            information(handle, True)
+            reader = information
+            if reader is _PUBLIC_INFORMATION_IMPLEMENTATION:
+                # Query and validate now; discard only unused metadata formatting.
+                _information_record(handle, True)
+            else:
+                reader(handle, True)
 
     def close(self):
         handles, self.handles = self.handles, []

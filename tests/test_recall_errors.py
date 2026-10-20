@@ -1,7 +1,7 @@
 """Error visibility (F3): load-bearing paths log failures instead of hiding
 them as a silent empty result. Telemetry swallows are intentionally untouched."""
 
-import logging
+import pytest
 
 from olympus import config, errors, gmail, recall, usage
 
@@ -26,8 +26,11 @@ def test_real_extract_error_is_logged_not_silent(monkeypatch):
                              _SETTINGS)
     assert summary == {}
     # ...but the real error is surfaced, not swallowed.
-    assert captured and captured[0][0] == "recall.extract"
-    assert "exploded" in captured[0][1]
+    # Native Windows can first report its independent fcntl-unavailable
+    # diagnostic. Require the extractor's actual error without ordering the
+    # unrelated platform diagnostic ahead of or behind this operation.
+    actual = [message for where, message in captured if where == "recall.extract"]
+    assert actual == ["RuntimeError('extractor backend exploded')"]
 
 
 def test_expected_empty_paths_do_not_log(monkeypatch):
@@ -49,13 +52,14 @@ def test_expected_empty_paths_do_not_log(monkeypatch):
     assert captured == []          # none of the expected paths logged an error
 
 
-def test_connector_swallow_now_logs(monkeypatch, caplog):
-    # gmail's OAuth-token lookup falls back on failure, but now logs it.
+def test_connector_unavailability_refuses_environment_fallback(monkeypatch, caplog):
     monkeypatch.setenv("GMAIL_ACCESS_TOKEN", "env-tok")
     import olympus.google_oauth as go
-    monkeypatch.setattr(go, "connected",
-                        lambda user: (_ for _ in ()).throw(RuntimeError("oauth store broken")))
-    with caplog.at_level(logging.WARNING, logger="olympus.gmail"):
-        tok = gmail._access_token()
-    assert tok == "env-tok"                      # fell back, didn't crash
-    assert any("OAuth token lookup failed" in r.message for r in caplog.records)
+    primary = RuntimeError("owned private unavailable marker")
+    def unavailable(user):
+        raise primary
+    monkeypatch.setattr(go, "access_token_if_connected", unavailable)
+    with pytest.raises(RuntimeError) as caught:
+        gmail._access_token()
+    assert caught.value is primary
+    assert not any("owned private unavailable marker" in record.message for record in caplog.records)

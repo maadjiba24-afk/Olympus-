@@ -350,7 +350,7 @@ def test_verify_timeout_disabled_by_env_zero(monkeypatch):
     '"confidence": null}',                      # nulls
     'VERDICT: {"status": 42, "unsupported_claims": [], "confidence": 1}',
     "VERDICT: " + "{" * 5000,                   # pathological nesting prefix
-])
+], ids=[None, None, None, 'nested-braces-5000'])
 def test_parse_verdict_never_crashes_on_garbage(pathological):
     content, verdict = orchestrator._parse_verdict(pathological)
     # Either a schema-coerced verdict or None (infra path) — never a crash,

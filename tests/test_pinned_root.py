@@ -9,6 +9,10 @@ safe alternative to the rejected context-sensitive `workdir()`: the root travels
 *with* the action.
 """
 import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,16 +65,20 @@ def test_write_file_executes_in_pinned_root_after_workdir_changes(monkeypatch,
     assert Path(res["path"]) == (root_a / "out.txt").resolve()
 
 
-def test_run_command_executes_in_pinned_root_after_workdir_changes(monkeypatch,
-                                                                   tmp_path):
-    a = actions.prepare("u", "run_command",
-                        {"command": "printf hi > marker.txt"})
+def test_run_command_executes_in_pinned_root_after_workdir_changes(monkeypatch, tmp_path):
+    # Use the real local command executor on both supported native platforms.
+    code = "from pathlib import Path; Path('marker.txt').write_text('hi', encoding='utf-8')"
+    argv = [sys.executable, '-c', code]
+    command = subprocess.list2cmdline(argv) if os.name == 'nt' else shlex.join(argv)
+    a = actions.prepare("u", "run_command", {"command": command})
     root_a = Path(a.payload["_pinned_root"])
     root_b = tmp_path / "other_ws"
     root_b.mkdir()
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(root_b))
-    builtin_actions._run_command_execute(a.payload)
-    assert (root_a / "marker.txt").is_file()              # ran in the pinned root
+    assert sandbox.workdir() == root_b.resolve()
+    result = builtin_actions._run_command_execute(a.payload)
+    assert result['ok'] is True and result['code'] == 0
+    assert (root_a / "marker.txt").read_text(encoding='utf-8') == 'hi'
     assert not (root_b / "marker.txt").exists()
 
 

@@ -134,60 +134,136 @@ def test_repair_never_rewrites_valid_or_missing_state():
     assert not list(path.parent.glob("prefs.corrupt.*.json"))
 
 
-def test_repair_preserves_source_and_archive_if_reset_publish_fails(
-        monkeypatch):
-    user = "interrupted-repair"
-    raw = b"broken-evidence"
+@pytest.mark.parametrize('failure_kind', [OSError, KeyboardInterrupt, SystemExit])
+def test_repair_preserves_source_and_archive_if_reset_publish_fails(monkeypatch, failure_kind):
+    from olympus import prefs_native, prefs_records
+    user = 'interrupted-repair'
+    operation_id = '1' * 32
+    raw = b'broken-evidence'
     path = _corrupt(user, raw)
-    original_publish = atomicio.publish
-    calls = 0
-
-    def fail_reset(tmp, destination, data, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("simulated reset failure")
-        return original_publish(tmp, destination, data, **kwargs)
-
-    monkeypatch.setattr(atomicio, "publish", fail_reset)
-
-    with pytest.raises(OSError, match="simulated reset failure"):
-        prefs.repair(user)
-
+    current = prefs.credential_paths(user)[0]
     digest = hashlib.sha256(raw).hexdigest()
-    assert path.read_bytes() == raw
-    archive = path.with_name(
-        f"prefs.corrupt.{digest[:prefs._QUARANTINE_DIGEST_HEX]}.json")
+    retained = current[:-1] + (f'prefs.corrupt.{digest[:prefs._QUARANTINE_DIGEST_HEX]}.json',)
+    archive = prefs._io(config.MEMORY_DIR.joinpath(*retained))
+    injected = failure_kind('owned reset publication fault')
+    actual_publish = prefs_native.Transaction.publish
+    observations = []
+
+    def fail_reset(transaction, parts, data):
+        if tuple(parts) == current:
+            observations.append((transaction.read(retained), transaction.read(current), data))
+            raise injected
+        return actual_publish(transaction, parts, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(prefs_native.Transaction, 'publish', fail_reset)
+        expected = prefs.PreferenceOperationError if failure_kind is OSError else failure_kind
+        with pytest.raises(expected) as caught:
+            prefs.repair(user, operation_id=operation_id)
+        if failure_kind is OSError:
+            assert type(caught.value) is prefs.PreferenceOperationError
+            assert caught.value.operation_id == operation_id
+            assert str(caught.value) == f'preference recovery result is unconfirmed; operation {operation_id}'
+            assert caught.value.__cause__ is None and caught.value.__context__ is None
+        else:
+            assert caught.value is injected
+            assert caught.value.__dict__['_preference_recovery_operation'] == operation_id
+        assert len(observations) == 1
+        archived, original, intended = observations[0]
+        assert archived[0] == original[0] == raw
+        assert archived[1] is not None and original[1] is not None
+        assert intended == prefs_records.encode({})
+        assert path.read_bytes() == archive.read_bytes() == raw
+        locations = prefs._recovery_locations(operation_id)
+        assert prefs._io(config.MEMORY_DIR.joinpath(*locations['source'])).read_bytes() == raw
+        assert prefs._io(config.MEMORY_DIR.joinpath(*locations['before'])).read_bytes() == raw
+        assert prefs._io(config.MEMORY_DIR.joinpath(*locations['after'])).read_bytes() == intended
+        io_root = prefs._io(config.MEMORY_DIR)
+        before = {p.relative_to(io_root).as_posix(): p.read_bytes()
+                  for p in io_root.rglob('*') if p.is_file()}
+        with pytest.raises(prefs.PreferenceOperationError) as blocked:
+            prefs.repair(user, operation_id='2' * 32)
+        assert blocked.value.operation_id == operation_id
+        assert len(observations) == 1
+        assert {p.relative_to(io_root).as_posix(): p.read_bytes()
+                for p in io_root.rglob('*') if p.is_file()} == before
+
+    # Exact-ID retry resumes the fixed plan and reconfirms the existing archive.
+    actual_write_new = prefs_native.Transaction.write_new
+    recreated = []
+    def no_archive_recreation(transaction, parts, data):
+        if tuple(parts) == retained:
+            recreated.append(tuple(parts))
+            raise AssertionError('owned archive must be reconfirmed, not recreated')
+        return actual_write_new(transaction, parts, data)
+    with monkeypatch.context() as patch:
+        patch.setattr(prefs_native.Transaction, 'write_new', no_archive_recreation)
+        result = prefs.repair(user, operation_id=operation_id)
+    assert not recreated
+    assert result['repaired'] is True and result['completed'] is True
+    assert result['operation_id'] == operation_id and result['quarantined_sha256'] == digest
+    assert result['quarantine_file'] == archive.name
+    assert prefs.load(user) == {} and path.read_bytes() == intended
     assert archive.read_bytes() == raw
+    with prefs_native.transaction(config.MEMORY_DIR) as transaction:
+        assert transaction.read(retained) == archived
 
 
-def test_malformed_legacy_migration_preserves_source_until_explicit_discard():
-    legacy_id = "legacy-owner"
-    path = config.MEMORY_DIR / "users" / legacy_id / "prefs.json"
+def test_malformed_legacy_migration_preserves_source_until_explicit_discard(monkeypatch):
+    from olympus import prefs_native
+    legacy_id = 'legacy-owner'
+    operation_id = '3' * 32
+    path = config.MEMORY_DIR / 'users' / legacy_id / 'prefs.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = b'{"autonomy": 0'
     path.write_bytes(raw)
+    # Coordination first-use is an independent native effect, not a migration.
+    # Establish it before the no-publication/no-data-change observation.
+    with prefs_native.transaction(config.MEMORY_DIR):
+        pass
+    before = {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
+              for p in config.MEMORY_DIR.rglob('*') if p.is_file()}
+    before_directories = {p.relative_to(config.MEMORY_DIR).as_posix()
+                          for p in config.MEMORY_DIR.rglob('*') if p.is_dir()}
+    effects = []
+    def forbidden(*args, **kwargs):
+        effects.append('mutation')
+        raise AssertionError('malformed legacy evidence must not dispatch a mutation')
+    with monkeypatch.context() as patch:
+        for name in ('publish', 'write_new', 'retire'):
+            patch.setattr(prefs_native.Transaction, name, forbidden)
+        with pytest.raises(prefs.PreferenceOperationError) as caught:
+            prefs.migrate_legacy(legacy_id, 'verified-owner', operation_id=operation_id)
+    assert type(caught.value) is prefs.PreferenceOperationError
+    assert caught.value.operation_id == operation_id
+    assert str(caught.value) == f'preference recovery evidence requires explicit reconciliation; operation {operation_id}'
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert not effects and path.read_bytes() == raw
+    assert {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
+            for p in config.MEMORY_DIR.rglob('*') if p.is_file()} == before
+    assert {p.relative_to(config.MEMORY_DIR).as_posix()
+            for p in config.MEMORY_DIR.rglob('*') if p.is_dir()} == before_directories
 
-    with pytest.raises(ValueError, match="legacy preference evidence"):
-        prefs.migrate_legacy(legacy_id, "verified-owner")
 
-    assert path.read_bytes() == raw
-
-
-@pytest.mark.parametrize("saved", ["broken", True, [], float("inf")])
+@pytest.mark.parametrize('saved', ['broken', True, [], float('inf')])
 def test_malformed_saved_budget_refuses_new_model_work(saved):
-    prefs.set("shared", "daily_budget", saved)
-
+    if type(saved) is float:
+        assert saved == float('inf')
+        path = _corrupt('shared', b'{"daily_budget": Infinity}')
+    else:
+        prefs.set('shared', 'daily_budget', saved)
+        path = prefs._path('shared')
+    before = path.read_bytes()
     with pytest.raises(usage.BudgetPolicyUnavailable,
-                       match="(?i)daily-budget policy evidence"):
+                       match='(?i)daily-budget policy evidence'):
         usage.check_budget()
-
     status = usage.budget_status()
-    assert status["evidence_state"] == "unavailable"
-    assert status["enabled"] is True
-    assert status["exceeded"] is True
-    assert status["remaining"] == 0.0
+    assert status['evidence_state'] == 'unavailable'
+    assert status['enabled'] is True
+    assert status['exceeded'] is True
+    assert status['remaining'] == 0.0
     assert usage.budget_headroom_low() is True
+    assert path.read_bytes() == before
 
 
 def test_corrupt_shared_preferences_pause_work_and_surface_operator_status(
@@ -247,3 +323,15 @@ def test_background_readers_never_invoke_preference_repair(monkeypatch):
     assert actions.autonomy_level(user) == 0
     assert operator.sites(user) == {}
     assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')], ids=['nan', 'positive-infinity', 'negative-infinity'])
+def test_nonfinite_budget_writer_refuses_without_replacing_valid_evidence(value):
+    from olympus import prefs_records
+    prefs.set('shared', 'daily_budget', 4.0)
+    path = prefs._path('shared')
+    before = path.read_bytes()
+    with pytest.raises(prefs_records.PreferenceRecordError):
+        prefs.set('shared', 'daily_budget', value)
+    assert path.read_bytes() == before
+    assert prefs.get('shared', 'daily_budget') == 4.0

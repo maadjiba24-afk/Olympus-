@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 137,
+    "count": 139,
     "names": [
       "a2a",
       "actions",
@@ -60,6 +60,7 @@
       "audit",
       "autonomy",
       "backup",
+      "backup-evidence",
       "budget",
       "calibration",
       "capabilities",
@@ -177,6 +178,7 @@
       "undo",
       "upgrade",
       "usage",
+      "vault-evidence",
       "verify",
       "verify-anchor",
       "version",

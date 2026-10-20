@@ -191,7 +191,7 @@ def test_ci_runs_complete_windows_python_312_suite():
         "python -m olympus capabilities --check",
         "python scripts/check_threat_model.py",
         "python scripts/noninterference_gate.py",
-        "python -m pytest -q",
+        "python -m scripts.ci_windows_suite run",
     ):
         assert command in body, f"Windows CI is missing `{command}`"
 
@@ -677,3 +677,63 @@ def test_required_suite_no_longer_asserts_absolute_sync_latency():
         "the paired/order-balanced structural contract must remain required — "
         "without it the A/B could silently become sequential and order-biased "
         "again, and only the telemetry job would ever notice")
+
+
+# The Windows orchestration changes; the complete-suite and resource contracts
+# do not. Four sequential partitions collectively execute every collected node.
+def test_windows_partitions_are_four_separate_bounded_non_cancelling_jobs():
+    body = _job_body("windows-test")
+    assert re.search(r"(?m)^    timeout-minutes: 40$", body)
+    assert re.search(r"(?m)^      fail-fast: false$", body)
+    assert re.search(r"(?m)^      max-parallel: 4$", body)
+    assert re.search(r"(?m)^        shard: \[0, 1, 2, 3\]$", body)
+    assert "name: test (windows-py3.12 shard ${{ matrix.shard }})" in body
+    assert "--shard ${{ matrix.shard }}" in body
+    assert "--expected-sha \"${{ github.sha }}\"" in body
+    assert "uses: actions/upload-artifact@" in body
+    assert "if: always()" in body and "overwrite: false" in body
+    assert "if-no-files-found: error" in body
+
+
+def test_windows_union_is_required_before_the_aggregate_can_pass():
+    body = _job_body("test-gate")
+    assert "python -m scripts.ci_windows_suite aggregate" in body
+    assert '--matrix-result "${{ needs.windows-test.result }}"' in body
+    assert "actions/download-artifact@" in body
+    assert "merge-multiple: false" in body
+    assert "--run-id" in body and "--attempt" in body
+    assert "--inputs" in body and "--output" in body
+    assert body.index("ci_windows_suite aggregate") < body.index("Require every test matrix leg to pass")
+    assert not re.search(r"(?m)^\s*continue-on-error:", body)
+    assert "timeout-minutes: 5" in body
+
+
+def test_linux_complete_suites_keep_named_outcomes_without_filtering():
+    body = _job_body("test")
+    assert "timeout-minutes: 25" in body
+    assert 'pytest -q --junitxml="$report"' in body
+    assert 'test ! -e "$report"' in body
+    assert "linux-suite-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}" in body
+    assert "actions/upload-artifact@" in body
+    assert "if: always()" in body and "if-no-files-found: error" in body
+    assert "overwrite: false" in body
+    assert not re.search(r"(?m)(?:^|\s)-k(?:\s|$)", body)
+    assert "--ignore" not in body and "continue-on-error" not in body
+
+
+def test_windows_runner_uses_the_original_unfiltered_pytest_entrypoint():
+    import ast
+    source = (_ROOT / "scripts" / "ci_windows_suite.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    calls = [node for node in ast.walk(run) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+             and node.func.value.id == "pytest" and node.func.attr == "main"]
+    assert len(calls) == 1 and isinstance(calls[0].args[0], ast.List)
+    arguments = calls[0].args[0].elts
+    assert len(arguments) == 2 and ast.literal_eval(arguments[0]) == "-q"
+    assert isinstance(arguments[1], ast.BinOp) and ast.literal_eval(arguments[1].left) == "--junitxml="
+    values = {node.targets[0].id: ast.literal_eval(node.value) for node in tree.body
+              if isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name) and node.targets[0].id in ("SHARDS", "CASE_TIMEOUT")}
+    assert values == {"SHARDS": 4, "CASE_TIMEOUT": 300}

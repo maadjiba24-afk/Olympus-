@@ -212,3 +212,75 @@ def test_act_mcp_add_scan_gate_and_remove(monkeypatch):
     assert not connectors.mcp_servers()
     r = adminpanel.act("mcp_remove", {"name": "gh"})
     assert not r["ok"]                        # already gone, in-band
+
+
+
+@pytest.mark.parametrize('fault', [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('variant', ['plain', 'missing_add_note', 'hostile_add_note',
+                                   'hostile_dict', 'malformed_notes'])
+@pytest.mark.parametrize('second_assignment_visible', [False, True])
+def test_hydration_interrupt_retains_exact_identity_and_partial_environment_fact(
+        monkeypatch, fault, variant, second_assignment_visible):
+    """Actual env assignment can lose its acknowledgement; never invoke hooks."""
+    keys = ('SLACK_BOT_TOKEN', 'SMTP_PASS')
+    values = ('owned-hydration-first', 'owned-hydration-second')
+    for key in keys:
+        # Register original absence/value before direct environment writes.
+        monkeypatch.setenv(key, 'owned-hydration-restore-sentinel')
+        monkeypatch.delenv(key, raising=False)
+    hooks = []
+    if variant == 'plain':
+        error = fault('owned-hydration-interruption')
+    else:
+        class AdversarialInterrupt(fault):
+            def __getattribute__(self, name):
+                if name == 'add_note' and variant == 'missing_add_note':
+                    hooks.append('missing_add_note_lookup')
+                    raise AttributeError('no add_note on Python 3.10')
+                return super().__getattribute__(name)
+            def add_note(self, value):
+                hooks.append('add_note')
+                raise AssertionError('exception callback must not run')
+            @property
+            def __dict__(self):
+                hooks.append('__dict__')
+                raise AssertionError('exception dict property must not run')
+        error = AdversarialInterrupt('owned-hydration-interruption')
+    attributes = BaseException.__dict__['__dict__'].__get__(error)
+    notes = 73 if variant == 'malformed_notes' else ['owned-existing-private-note']
+    attributes['__notes__'] = notes
+    before = dict(attributes)
+    snapshots = []
+    def entries(owner):
+        assert owner == opconfig.VAULT_USER
+        snapshots.append(owner)
+        return {opconfig.VAULT_PREFIX + key: value for key, value in zip(keys, values)}
+    actual_assign = type(os.environ).__setitem__
+    assignments = []
+    def assign(environment, key, value):
+        if key in keys:
+            assignments.append(key)
+            if key == keys[1]:
+                if second_assignment_visible:
+                    actual_assign(environment, key, value)
+                raise error
+        return actual_assign(environment, key, value)
+    caught = None
+    with monkeypatch.context() as patch:
+        patch.setattr(vault, 'entries', entries)
+        patch.setattr(type(os.environ), '__setitem__', assign)
+        try:
+            opconfig.apply_secrets()
+        except BaseException as observed:
+            caught = observed
+    assert caught is error and type(caught) is type(error)
+    assert assignments == list(keys) and snapshots == [opconfig.VAULT_USER]
+    assert os.environ[keys[0]] == values[0]
+    if second_assignment_visible:
+        assert os.environ[keys[1]] == values[1]
+    else:
+        assert keys[1] not in os.environ
+    assert hooks == []
+    assert attributes == {**before, '_secret_hydration_environment_unconfirmed': True}
+    assert attributes['__notes__'] is notes
+    assert attributes['_secret_hydration_environment_unconfirmed'] is True

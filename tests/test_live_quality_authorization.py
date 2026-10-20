@@ -132,6 +132,16 @@ def test_real_reviewed_checkout_rejects_dirty_and_stale_source(tmp_path, monkeyp
     for key in list(os.environ):
         if key.startswith("GIT_"):
             monkeypatch.delenv(key, raising=False)
+    # Remove authority-selection overrides, then establish explicit safety
+    # settings for this new local fixture. No external transport or user/system
+    # Git configuration is needed to test dirty/stale checkout refusal.
+    for key, value in {
+        "GIT_ALLOW_PROTOCOL": "file", "GIT_PROTOCOL_FROM_USER": "0",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+    }.items():
+        monkeypatch.setenv(key, value)
     repo = tmp_path / "owned-repo"
     repo.mkdir()
     def git(*args):

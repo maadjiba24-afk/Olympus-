@@ -36,6 +36,8 @@ would have sat.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 
 import pytest
@@ -200,9 +202,17 @@ def test_storage_key_never_collides_with_a_reserved_name():
 
 # --- pre-v2 vaults: quarantined, never implicitly claimed -----------------
 
+def _historical_ciphertext(payload):
+    # Deliberately reproduce the old unsalted format with this fixture's key;
+    # new production writes must not manufacture a legacy record for the test.
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(b"correct horse battery staple").digest())
+    return Fernet(key).encrypt(json.dumps(payload).encode())
+
+
 def _plant_legacy_vault(owner, payload):
     """Write a vault exactly as the pre-v5 `safe_id` layout did."""
-    blob = vault._fernet().encrypt(json.dumps(payload).encode())
+    blob = _historical_ciphertext(payload)
     store.backend().put(vault._NS, memory.safe_id(owner), blob)
     return memory.safe_id(owner)
 
@@ -229,20 +239,20 @@ def test_a_pre_v5_vault_is_claimed_by_nobody(first, second):
 def test_an_operator_can_explicitly_migrate_a_quarantined_vault():
     key = _plant_legacy_vault(A, {"google": {"access_token": "LEGACY"}})
 
-    assert vault.migrate_legacy(key, A) == 1
+    assert vault.migrate_legacy(key, A, operation_id="1" * 32) == 1
     assert vault.get(A, "google") == {"access_token": "LEGACY"}
     assert vault.get(B, "google") is None
     assert vault.legacy_tenants() == []
     # It cannot be claimed twice.
     with pytest.raises(vault.VaultError):
-        vault.migrate_legacy(key, B)
+        vault.migrate_legacy(key, B, operation_id="2" * 32)
 
 
 @needs_crypto
 def test_migration_refuses_a_reserved_namespace_as_the_claimant():
     key = _plant_legacy_vault(A, {"google": {"access_token": "LEGACY"}})
-    with pytest.raises(ValueError, match="reserved"):
-        vault.migrate_legacy(key, "operator")
+    with pytest.raises(vault.VaultError, match="unavailable or invalid"):
+        vault.migrate_legacy(key, "operator", operation_id="1" * 32)
     assert vault.legacy_tenants() == [key], "the vault was consumed anyway"
 
 
@@ -251,7 +261,7 @@ def test_migration_never_overwrites_a_live_secret_by_default():
     vault.put(A, "google", {"access_token": "CURRENT"})
     key = _plant_legacy_vault(A, {"google": {"access_token": "LEGACY"},
                                   "other": "X"})
-    assert vault.migrate_legacy(key, A) == 1          # only "other"
+    assert vault.migrate_legacy(key, A, operation_id="1" * 32) == 1          # only "other"
     assert vault.get(A, "google") == {"access_token": "CURRENT"}
     assert vault.get(A, "other") == "X"
 
@@ -259,9 +269,9 @@ def test_migration_never_overwrites_a_live_secret_by_default():
 @needs_crypto
 def test_an_operator_can_discard_a_quarantined_vault():
     key = _plant_legacy_vault(A, {"google": {"access_token": "LEGACY"}})
-    assert vault.discard_legacy(key) is True
+    assert vault.discard_legacy(key, operation_id="3" * 32) is True
     assert vault.legacy_tenants() == []
-    assert vault.discard_legacy(key) is False
+    assert vault.discard_legacy(key, operation_id="3" * 32) is False
 
 
 @needs_crypto
@@ -360,10 +370,10 @@ def test_pending_secure_capture_is_not_shared(first, second):
     A collider must neither see it nor be able to clear it."""
     from olympus import securecapture
 
-    securecapture.request(first, "acme.test")
+    request_id = securecapture.request(first, "acme.test")
     assert securecapture.pending(first) == "acme.test"
     assert securecapture.pending(second) is None
-    securecapture.clear(second)
+    assert securecapture.clear(second, request_id=request_id) is False
     assert securecapture.pending(first) == "acme.test", "clear crossed owners"
 
 
@@ -452,10 +462,25 @@ def test_an_operator_can_explicitly_migrate_quarantined_preferences():
     assert prefs.legacy_owners() == []
 
 
-def test_preference_migration_refuses_a_reserved_namespace():
-    key = _plant_legacy_prefs(A, {"autonomy": 4})
-    with pytest.raises(ValueError, match="reserved"):
-        prefs.migrate_legacy(key, "shared")
+@pytest.mark.parametrize('owner', ['shared', 'operator'])
+def test_preference_migration_refuses_a_reserved_namespace(monkeypatch, owner):
+    from olympus import prefs_native, prefs_recovery_records
+    key = _plant_legacy_prefs(A, {'autonomy': 4})
+    assert prefs.legacy_owners() == [key]
+    before = {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
+              for p in config.MEMORY_DIR.rglob('*') if p.is_file()}
+    acquisition = []
+    def forbidden(*args, **kwargs):
+        acquisition.append('native-transaction')
+        raise AssertionError('reserved claimant reached native acquisition')
+    with monkeypatch.context() as patch:
+        patch.setattr(prefs_native, 'transaction', forbidden)
+        with pytest.raises(prefs_recovery_records.RecoveryEvidenceError,
+                           match='^preference recovery evidence requires explicit reconciliation$'):
+            prefs.migrate_legacy(key, owner, operation_id='4' * 32)
+    assert not acquisition
+    assert {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
+            for p in config.MEMORY_DIR.rglob('*') if p.is_file()} == before
     assert prefs.legacy_owners() == [key]
 
 
@@ -744,35 +769,49 @@ def test_fresh_actions_still_work_beside_a_legacy_record():
 # =========================================================================
 
 def test_vault_and_prefs_never_key_storage_on_safe_id():
-    """`safe_id` merges principals. Neither store may use it for a storage key
-    again — the one permitted use is locating a QUARANTINED legacy record."""
+    """Only legacy lookup and an unchanged-input validation comparison are allowed."""
     import ast
     import inspect
     import pathlib
-
-    # The permitted uses are locating or detecting a QUARANTINED legacy record —
-    # never deriving a live storage key.
-    allowed = {"vault": {"legacy_tenants", "legacy_names", "migrate_legacy",
-                         "discard_legacy", "_legacy_key_for"},
-               "prefs": {"legacy_owners", "legacy_keys", "migrate_legacy",
-                         "discard_legacy", "is_quarantined"}}
+    allowed = {'vault': {'legacy_tenants', 'legacy_names', 'migrate_legacy',
+                         'discard_legacy', '_legacy_key_for'},
+               'prefs': {'legacy_owners', 'legacy_keys', 'migrate_legacy',
+                         'discard_legacy', 'is_quarantined', '_legacy_path_for'}}
     offenders = []
+    validated_comparisons = 0
+    expected = ast.dump(ast.parse('memory.safe_id(value) != value', mode='eval').body,
+                        include_attributes=False)
     for mod in (vault, prefs):
         path = pathlib.Path(inspect.getfile(mod))
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
         for fn in ast.walk(tree):
             if not isinstance(fn, ast.FunctionDef):
                 continue
-            if fn.name in allowed[mod.__name__.rsplit(".", 1)[-1]]:
+            if fn.name in allowed[mod.__name__.rsplit('.', 1)[-1]]:
                 continue
+            parents = {child: parent for parent in ast.walk(fn) for child in ast.iter_child_nodes(parent)}
             for node in ast.walk(fn):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "safe_id"):
-                    offenders.append(f"{mod.__name__}.{fn.name}:{node.lineno}")
-    assert not offenders, (
-        "a credential/preference store keys on safe_id at "
-        + ", ".join(offenders))
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'safe_id'):
+                    continue
+                if mod is prefs and fn.name == '_legacy_identifier':
+                    # Do not blanket-allow this function: the result of safe_id
+                    # may only be compared with the exact unmodified input.
+                    parent = parents[node]
+                    assert ast.dump(parent, include_attributes=False) == expected
+                    assert [arg.arg for arg in fn.args.args] == ['value']
+                    assert not fn.args.posonlyargs and not fn.args.kwonlyargs
+                    assert not fn.args.vararg and not fn.args.kwarg
+                    assert not any(isinstance(part, ast.Name) and part.id == 'value'
+                                   and isinstance(part.ctx, ast.Store) for part in ast.walk(fn))
+                    returns = [part for part in ast.walk(fn) if isinstance(part, ast.Return)]
+                    assert returns and all(isinstance(part.value, ast.Name)
+                                           and part.value.id == 'value' for part in returns)
+                    validated_comparisons += 1
+                else:
+                    offenders.append(f'{mod.__name__}.{fn.name}:{node.lineno}')
+    assert validated_comparisons == 1
+    assert not offenders, ('a credential/preference store keys on safe_id at ' + ', '.join(offenders))
 
 
 def test_per_owner_action_apis_do_not_reference_the_legacy_layout():
@@ -818,3 +857,24 @@ def test_every_job_constructor_stamps_the_ownership_version():
     assert not missing, (
         "scheduler.Job(...) built without owner_version at line(s) "
         + ", ".join(missing))
+
+
+@pytest.mark.parametrize('first,second', PAIRS)
+def test_native_credential_policy_paths_never_promote_legacy_collision_addresses(first, second, monkeypatch):
+    monkeypatch.setattr(prefs, '_io', lambda path: pytest.fail('pure path selection performed I/O'))
+    current_a, legacy_a = prefs.credential_paths(first)
+    current_b, legacy_b = prefs.credential_paths(second)
+    assert current_a != current_b and legacy_a == legacy_b
+    assert current_a != legacy_a and current_b != legacy_b
+    assert current_a[:2] == current_b[:2] == ('prefs', 'owners')
+    assert legacy_a[0] == 'users'
+    for reserved in ('shared', 'operator'):
+        assert prefs.credential_paths(reserved)[1] is None
+
+
+def test_legacy_preference_identifier_refuses_aliases_instead_of_normalizing():
+    for exact in ('legacy-owner', 'tg-a-b'):
+        assert prefs._legacy_identifier(exact) is exact
+    for alias in ('a.b', 'a@b', '../legacy-owner', ' shared '):
+        with pytest.raises(ValueError, match='^invalid legacy preference group$'):
+            prefs._legacy_identifier(alias)

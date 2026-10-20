@@ -803,6 +803,71 @@ def test_every_multiline_run_fails_fast():
 
 # --- actionlint ----------------------------------------------------------------
 
+def _close_actionlint_files(handles, primary):
+    """Attempt every owned close once without replacing an active exception."""
+    first = None
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except BaseException as error:
+            if first is None:
+                first = error
+    if first is not None:
+        retained = primary if primary is not None else first
+        state = BaseException.__dict__["__dict__"].__get__(retained, type(retained))
+        state["_actionlint_cleanup_unconfirmed"] = True
+        if primary is None:
+            raise first
+
+
+def _extract_actionlint_member(tar, tmp_path: Path):
+    """Extract only the checksum-admitted regular binary, including old 3.10."""
+    import tarfile
+
+    member = tar.getmember("actionlint")
+    assert member.name == "actionlint", "unexpected actionlint member name"
+    assert member.type in (tarfile.REGTYPE, tarfile.AREGTYPE), (
+        "actionlint member is not a plain regular file")
+    assert type(member.size) is int and 0 < member.size <= 64 * 1024 * 1024, (
+        "actionlint member size is outside the owned extraction bound")
+    binary = tmp_path / "actionlint"
+    if binary.exists() or binary.is_symlink():
+        raise FileExistsError("owned actionlint destination already exists")
+
+    data_filter = getattr(tarfile, "data_filter", None)
+    if data_filter is not None:
+        assert callable(data_filter), "invalid tar data filter"
+        tar.extract(member, path=tmp_path, filter=data_filter)
+        return
+
+    # Filters were backported to 3.10.12. Earlier 3.10 can still exercise the
+    # real lint control without an unfiltered tar path/metadata extraction.
+    source = output = None
+    primary = None
+    try:
+        source = tar.extractfile(member)
+        assert source is not None, "actionlint member has no file content"
+        output = binary.open("xb")
+        remaining = member.size
+        while remaining:
+            data = source.read(min(remaining, 64 * 1024))
+            assert type(data) is bytes and 0 < len(data) <= remaining, (
+                "actionlint member content is truncated or oversized")
+            written = output.write(data)
+            assert written == len(data), "short actionlint destination write"
+            remaining -= len(data)
+        assert source.read(1) == b"", "actionlint member contains excess bytes"
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        handles, output, source = (output, source), None, None
+        _close_actionlint_files(handles, primary)
+
+
+
 def _actionlint_binary(tmp_path: Path):
     """Fetch actionlint at an EXACT version and verify its checksum.
 
@@ -839,7 +904,7 @@ def _actionlint_binary(tmp_path: Path):
         f"actionlint archive checksum mismatch: {digest}")
 
     with tarfile.open(archive) as tar:
-        tar.extract(tar.getmember("actionlint"), path=tmp_path)
+        _extract_actionlint_member(tar, tmp_path)
     binary = tmp_path / "actionlint"
     binary.chmod(0o755)
     return binary
@@ -871,7 +936,7 @@ def _lock_requirements(path: Path) -> list[str]:
 
 
 def _lock_names(path: Path) -> set[str]:
-    return {re.split(r"[=<>!~\[; ]", req, 1)[0].lower()
+    return {re.split(r"[=<>!~\[; ]", req, maxsplit=1)[0].lower()
             for req in _lock_requirements(path)}
 
 
@@ -892,7 +957,7 @@ def test_every_lock_pins_everything_with_hashes(lock_path):
     requirements = _lock_requirements(lock_path)
     assert requirements, f"{lock_path.name} pins nothing"
     for req in requirements:
-        name = re.split(r"[=<>!~\[; ]", req, 1)[0]
+        name = re.split(r"[=<>!~\[; ]", req, maxsplit=1)[0]
         assert "==" in req, f"unpinned requirement: {req!r}"
         assert re.search(
             rf"(?m)^{re.escape(name)}==[^\n]*(\\\n\s+--hash=sha256:|"
@@ -1263,3 +1328,190 @@ def test_release_validation_is_executable_and_unit_tested():
         assert f"release_pipeline.py {command}" in raw or \
             f"release_pipeline.py \\\n" in raw and command in raw, (
             f"the workflow never invokes {command}")
+
+
+# Warning-remediation controls: owned tar bytes only; no downloads or execution.
+def _owned_actionlint_tar(payload=b"owned-actionlint-binary", kind=None):
+    import io
+    import tarfile
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        member = tarfile.TarInfo("actionlint")
+        member.type = tarfile.REGTYPE if kind is None else kind
+        member.size = len(payload) if member.type == tarfile.REGTYPE else 0
+        member.linkname = "owned-other" if member.type in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ""
+        archive.addfile(member, io.BytesIO(payload) if member.size else None)
+    stream.seek(0)
+    return stream
+
+
+@pytest.mark.parametrize("legacy_api", [False, True], ids=["current-api", "pre-filter-api"])
+def test_actionlint_exact_regular_payload_extracts_without_default_filter_warning(tmp_path, monkeypatch, legacy_api):
+    import tarfile
+    import warnings
+    original_filter = getattr(tarfile, "data_filter", None)
+    if legacy_api:
+        monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    payload = b"owned-actionlint-binary"
+    with _owned_actionlint_tar(payload) as stream, tarfile.open(fileobj=stream) as archive:
+        calls = []
+        actual_extract = archive.extract
+        def observed(member, *args, **kwargs):
+            calls.append(kwargs.copy())
+            assert callable(original_filter)
+            assert kwargs.get("filter") is original_filter
+            return actual_extract(member, *args, **kwargs)
+        monkeypatch.setattr(archive, "extract", observed)
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            _extract_actionlint_member(archive, tmp_path)
+        assert not [row for row in recorded if issubclass(row.category, DeprecationWarning)]
+    assert (tmp_path / "actionlint").read_bytes() == payload
+    assert len(calls) == (0 if legacy_api or original_filter is None else 1)
+
+
+@pytest.mark.parametrize("kind", [b"1", b"2", b"3", b"4", b"5", b"6", b"S"],
+                         ids=["hardlink", "symlink", "character", "block", "directory", "fifo", "sparse"])
+@pytest.mark.parametrize("legacy_api", [False, True], ids=["current-api", "pre-filter-api"])
+def test_actionlint_rejects_nonregular_member_before_extraction(tmp_path, monkeypatch, kind, legacy_api):
+    import tarfile
+    if legacy_api:
+        monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    # The parser is real. Only the GNU sparse marker is introduced after parsing,
+    # since constructing a genuine sparse data map would test tarfile itself.
+    stored_kind = tarfile.REGTYPE if kind == b"S" else kind
+    with _owned_actionlint_tar(kind=stored_kind) as stream, tarfile.open(fileobj=stream) as archive:
+        if kind == b"S":
+            archive.getmember("actionlint").type = kind
+        monkeypatch.setattr(archive, "extract", lambda *a, **kw: pytest.fail("invalid member extracted"))
+        monkeypatch.setattr(archive, "extractfile", lambda *a, **kw: pytest.fail("invalid member read"))
+        with pytest.raises(AssertionError, match="plain regular"):
+            _extract_actionlint_member(archive, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["../actionlint", "/actionlint", "nested/actionlint"], ids=["parent", "absolute", "nested"])
+def test_actionlint_refuses_changed_member_name(tmp_path, monkeypatch, name):
+    import tarfile
+    with _owned_actionlint_tar() as stream, tarfile.open(fileobj=stream) as archive:
+        member = archive.getmember("actionlint")
+        member.name = name
+        monkeypatch.setattr(archive, "getmember", lambda requested: member)
+        monkeypatch.setattr(archive, "extract", lambda *a, **kw: pytest.fail("invalid name extracted"))
+        monkeypatch.setattr(archive, "extractfile", lambda *a, **kw: pytest.fail("invalid name read"))
+        with pytest.raises(AssertionError, match="member name"):
+            _extract_actionlint_member(archive, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("size", [0, -1, True, 64 * 1024 * 1024 + 1], ids=["empty", "negative", "bool", "overflow"])
+def test_actionlint_refuses_invalid_size_before_read_or_create(tmp_path, monkeypatch, size):
+    import tarfile
+    with _owned_actionlint_tar() as stream, tarfile.open(fileobj=stream) as archive:
+        archive.getmember("actionlint").size = size
+        monkeypatch.setattr(archive, "extract", lambda *a, **kw: pytest.fail("invalid size extracted"))
+        monkeypatch.setattr(archive, "extractfile", lambda *a, **kw: pytest.fail("invalid size read"))
+        with pytest.raises(AssertionError, match="member size"):
+            _extract_actionlint_member(archive, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("legacy_api", [False, True], ids=["current-api", "pre-filter-api"])
+def test_actionlint_never_overwrites_existing_owned_destination(tmp_path, monkeypatch, legacy_api):
+    import tarfile
+    if legacy_api:
+        monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    binary = tmp_path / "actionlint"
+    binary.write_bytes(b"retained-before")
+    with _owned_actionlint_tar() as stream, tarfile.open(fileobj=stream) as archive:
+        with pytest.raises(FileExistsError):
+            _extract_actionlint_member(archive, tmp_path)
+    assert binary.read_bytes() == b"retained-before"
+
+
+def test_actionlint_invalid_filter_does_not_fall_back(tmp_path, monkeypatch):
+    import tarfile
+    monkeypatch.setattr(tarfile, "data_filter", object(), raising=False)
+    with _owned_actionlint_tar() as stream, tarfile.open(fileobj=stream) as archive:
+        monkeypatch.setattr(archive, "extractfile", lambda *a, **kw: pytest.fail("invalid filter fell back"))
+        with pytest.raises(AssertionError, match="invalid tar data filter"):
+            _extract_actionlint_member(archive, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("fault", [OSError, KeyboardInterrupt, SystemExit], ids=["oserror", "interrupt", "exit"])
+def test_actionlint_legacy_copy_preserves_primary_and_drains_both_files(tmp_path, monkeypatch, fault):
+    import io
+    import tarfile
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    primary = fault("owned primary")
+    observed = []
+    class Payload(io.BytesIO):
+        def read(self, *args):
+            raise primary
+        def close(self):
+            observed.append("payload")
+            super().close()
+            raise OSError("owned payload close acknowledgement lost")
+    class Destination:
+        def __init__(self, handle):
+            self.handle = handle
+        def write(self, data):
+            return self.handle.write(data)
+        def close(self):
+            observed.append("destination")
+            self.handle.close()
+            raise OSError("owned destination close acknowledgement lost")
+    original_open = Path.open
+    def open_destination(path, *args, **kwargs):
+        return Destination(original_open(path, *args, **kwargs))
+    with _owned_actionlint_tar() as stream, tarfile.open(fileobj=stream) as archive:
+        payload = Payload(b"owned")
+        monkeypatch.setattr(archive, "extractfile", lambda member: payload)
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "open", open_destination)
+            with pytest.raises(fault) as caught:
+                _extract_actionlint_member(archive, tmp_path)
+    assert caught.value is primary
+    assert observed == ["destination", "payload"]
+    assert payload.closed
+    assert primary.__dict__["_actionlint_cleanup_unconfirmed"] is True
+
+
+@pytest.mark.parametrize("fault", [OSError, KeyboardInterrupt, SystemExit], ids=["oserror", "interrupt", "exit"])
+def test_actionlint_legacy_copy_cleanup_only_failure_is_not_success(tmp_path, monkeypatch, fault):
+    import io
+    import tarfile
+    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    cleanup = fault("owned close acknowledgement lost")
+    closed = []
+    class Payload(io.BytesIO):
+        def close(self):
+            closed.append("payload")
+            super().close()
+            raise cleanup
+    with _owned_actionlint_tar(b"owned") as stream, tarfile.open(fileobj=stream) as archive:
+        payload = Payload(b"owned")
+        monkeypatch.setattr(archive, "extractfile", lambda member: payload)
+        with pytest.raises(fault) as caught:
+            _extract_actionlint_member(archive, tmp_path)
+    assert caught.value is cleanup and payload.closed
+    assert closed == ["payload"]
+    assert (tmp_path / "actionlint").read_bytes() == b"owned"
+    assert cleanup.__dict__["_actionlint_cleanup_unconfirmed"] is True
+
+
+def test_actionlint_checksum_refuses_before_member_extraction(tmp_path, monkeypatch):
+    import io
+    import platform
+    import urllib.request
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: io.BytesIO(b"owned wrong archive"))
+    monkeypatch.setitem(ACTIONLINT_SHA256, "linux_amd64", "0" * 64)
+    monkeypatch.setitem(globals(), "_extract_actionlint_member",
+                        lambda *a, **kw: pytest.fail("checksum refusal reached extraction"))
+    with pytest.raises(AssertionError, match="checksum mismatch"):
+        _actionlint_binary(tmp_path)
+    assert not (tmp_path / "actionlint").exists()
+

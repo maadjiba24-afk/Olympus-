@@ -1468,8 +1468,8 @@ def test_gmail_oauth_lookup_uses_the_exact_owner(monkeypatch):
     from olympus import gmail, google_oauth
 
     seen: list[str] = []
-    monkeypatch.setattr(google_oauth, "connected",
-                        lambda user: seen.append(user) or False)
+    monkeypatch.setattr(google_oauth, "access_token_if_connected",
+                        lambda user: seen.append(user) or None)
     memory.set_user(_PUNCT_A)
     try:
         gmail._access_token()

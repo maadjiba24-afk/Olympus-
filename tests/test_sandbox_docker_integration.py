@@ -6,6 +6,8 @@ the base image are available, so it is a no-op in environments without docker
 test_sandbox.py already unit-tests that the flags land in the argv; this proves
 they change container behaviour."""
 
+import shutil
+
 import pytest
 
 from olympus import sandbox
@@ -13,6 +15,8 @@ from olympus import sandbox
 
 @pytest.fixture()
 def docker_ws(tmp_path, monkeypatch):
+    if shutil.which("docker") is None:
+        pytest.skip("docker executable unavailable on PATH")
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
     monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "docker")
     # Probe: skip unless docker can actually run the base image here.

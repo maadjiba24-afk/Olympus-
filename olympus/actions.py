@@ -451,16 +451,22 @@ def granted_scopes(user: str) -> set[str]:
 
 
 def grant_scope(user: str, scope: str) -> str:
-    s = granted_scopes(user)
-    s.add(scope)
-    prefs.set(user, "scopes", sorted(s))
+    def apply(data):
+        scopes = set(data.get('scopes') or [])
+        scopes.add(scope)
+        data['scopes'] = sorted(scopes)
+        return data
+    prefs.mutate(user, apply, clamp_keys=('scopes',))
     return f"Granted scope '{scope}'."
 
 
 def revoke_scope(user: str, scope: str) -> str:
-    s = granted_scopes(user)
-    s.discard(scope)
-    prefs.set(user, "scopes", sorted(s))
+    def apply(data):
+        scopes = set(data.get('scopes') or [])
+        scopes.discard(scope)
+        data['scopes'] = sorted(scopes)
+        return data
+    prefs.mutate(user, apply, clamp_keys=('scopes',))
     return f"Revoked scope '{scope}'."
 
 
@@ -490,14 +496,14 @@ QUARANTINE_DAILY_LIMIT = 1
 
 
 def daily_limit(user: str, type_name: str) -> int:
-    """Max executions/day for an action type. A per-user override (set via
-    `olympus limit`) wins over the risk-class default; 0 means unlimited."""
-    if prefs.is_quarantined(user):
-        # NOT the class default: 0 there means unlimited, so falling through
-        # would turn "we do not know what this principal was limited to" into
-        # "no limit at all".
+    """Resolve quarantine and the cap from the same captured policy evidence."""
+    try:
+        observed = prefs.capture(user)
+        if prefs.is_quarantined(user, captured=observed):
+            return QUARANTINE_DAILY_LIMIT
+        overrides = prefs.get(user, 'action_limits', {}, captured=observed) or {}
+    except prefs.PreferencesStateError:
         return QUARANTINE_DAILY_LIMIT
-    overrides = prefs.get(user, "action_limits", {}) or {}
     if type_name in overrides:
         try:
             return max(0, int(overrides[type_name]))
@@ -508,14 +514,17 @@ def daily_limit(user: str, type_name: str) -> int:
 
 
 def set_limit(user: str, type_name: str, n: int) -> str:
-    """Persist a per-user daily execution cap for an action type (0 = off)."""
-    overrides = dict(prefs.get(user, "action_limits", {}) or {})
-    overrides[type_name] = max(0, int(n))
-    prefs.set(user, "action_limits", overrides)
-    if overrides[type_name] == 0:
+    """Persist a cap while retaining other current action limits."""
+    selected = max(0, int(n))
+    def apply(data):
+        overrides = dict(data.get('action_limits') or {})
+        overrides[type_name] = selected
+        data['action_limits'] = overrides
+        return data
+    prefs.mutate(user, apply, clamp_keys=('action_limits',))
+    if selected == 0:
         return f"Removed the daily limit on '{type_name}' (now unlimited)."
-    return (f"Daily limit for '{type_name}' set to {overrides[type_name]} "
-            f"execution(s) per day.")
+    return f"Daily limit for '{type_name}' set to {selected} execution(s) per day."
 
 
 def limits(user: str) -> dict[str, int]:
